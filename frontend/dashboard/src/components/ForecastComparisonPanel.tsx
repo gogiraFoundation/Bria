@@ -80,7 +80,7 @@ const ForecastComparisonPanel: React.FC<ForecastComparisonPanelProps> = ({
         throw new Error('Not authenticated');
       }
       const response = await axios.get(
-        `${API_URL}/v1/sites/${siteId}/production?days=${historicalDays}`,
+        `${API_URL}/v1/sites/${siteId}/production/history?days=${historicalDays}`,
         {
           headers: {
             Authorization: `Bearer ${token}`,

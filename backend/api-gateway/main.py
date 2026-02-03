@@ -61,8 +61,8 @@ async def add_security_headers(request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     # Remove server header in production
-    if not settings.DEBUG:
-        response.headers.pop("server", None)
+    if not settings.DEBUG and "server" in response.headers:
+        del response.headers["server"]
     return response
 
 # Security
@@ -982,8 +982,18 @@ async def get_forecast(
     current_user: dict = Depends(get_current_user)
 ):
     """Get forecast for a specific site"""
-    # Parse horizon
-    horizon_hours = int(horizon.replace('h', ''))
+    # Parse horizon - handle both hours (24h, 48h) and days (7d, 30d)
+    if horizon.endswith('h'):
+        horizon_hours = int(horizon.replace('h', ''))
+    elif horizon.endswith('d'):
+        horizon_days = int(horizon.replace('d', ''))
+        horizon_hours = horizon_days * 24
+    else:
+        # Try to parse as integer (assume hours)
+        try:
+            horizon_hours = int(horizon)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid horizon format: {horizon}. Use '24h', '48h', '7d', or '30d'")
     
     # Check site access
     async with db_pool.acquire() as conn:
@@ -2921,8 +2931,19 @@ async def get_forecast_scheduling(
         if not site:
             raise HTTPException(status_code=404, detail="Site not found")
     
-    # Parse horizon
-    horizon_hours = int(horizon.replace('h', ''))
+    # Parse horizon - handle both hours (24h, 48h) and days (7d, 30d)
+    horizon_hours = 24  # default
+    if horizon.endswith('h'):
+        horizon_hours = int(horizon.replace('h', ''))
+    elif horizon.endswith('d'):
+        horizon_days = int(horizon.replace('d', ''))
+        horizon_hours = horizon_days * 24
+    else:
+        # Try to parse as integer (assume hours)
+        try:
+            horizon_hours = int(horizon)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid horizon format: {horizon}. Use '24h', '48h', '7d', or '30d'")
     
     # Get forecast
     try:
@@ -3362,7 +3383,18 @@ async def get_forecast_insights(
         if not site:
             raise HTTPException(status_code=404, detail="Site not found")
     
-    horizon_hours = int(horizon.replace('h', ''))
+    # Parse horizon - handle both hours (24h, 48h) and days (7d, 30d)
+    if horizon.endswith('h'):
+        horizon_hours = int(horizon.replace('h', ''))
+    elif horizon.endswith('d'):
+        horizon_days = int(horizon.replace('d', ''))
+        horizon_hours = horizon_days * 24
+    else:
+        # Try to parse as integer (assume hours)
+        try:
+            horizon_hours = int(horizon)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid horizon format: {horizon}. Use '24h', '48h', '7d', or '30d'")
     
     try:
         # Get forecast

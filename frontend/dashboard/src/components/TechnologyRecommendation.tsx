@@ -22,9 +22,6 @@ import axios from 'axios';
 import SolarPowerIcon from '@mui/icons-material/SolarPower';
 import AirIcon from '@mui/icons-material/Air';
 import HubIcon from '@mui/icons-material/Hub';
-import TrendingUpIcon from '@mui/icons-material/TrendingUp';
-import AttachMoneyIcon from '@mui/icons-material/AttachMoney';
-import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import WarningIcon from '@mui/icons-material/Warning';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
@@ -186,16 +183,6 @@ const TechnologyRecommendation: React.FC<TechnologyRecommendationProps> = ({
     }
   };
 
-  const getConfidenceColor = (confidence: string) => {
-    switch (confidence) {
-      case 'high':
-        return 'success';
-      case 'medium':
-        return 'warning';
-      default:
-        return 'error';
-    }
-  };
 
   return (
     <Card>
