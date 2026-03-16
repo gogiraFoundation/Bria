@@ -213,10 +213,16 @@ const ForecastSuggestions: React.FC<ForecastSuggestionsProps> = ({
 
   if (isLoading) {
     return (
-      <Card>
+      <Card
+        elevation={2}
+        sx={{
+          borderRadius: 2,
+          height: '100%',
+        }}
+      >
         <CardContent>
-          <Typography variant="h6" gutterBottom>
-            Forecast Analysis
+          <Typography variant="h6" gutterBottom sx={{ fontWeight: 600 }}>
+            Forecast Insights & Recommendations
           </Typography>
           <Typography color="textSecondary">Analyzing forecast data...</Typography>
         </CardContent>
@@ -230,14 +236,33 @@ const ForecastSuggestions: React.FC<ForecastSuggestionsProps> = ({
 
   if (suggestions.length === 0) {
     return (
-      <Card>
+      <Card
+        elevation={2}
+        sx={{
+          borderRadius: 2,
+          height: '100%',
+          transition: 'transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out',
+          '&:hover': {
+            transform: 'translateY(-2px)',
+            boxShadow: 4,
+          },
+        }}
+      >
         <CardContent>
-          <Typography variant="h6" gutterBottom>
-            Forecast Analysis
-          </Typography>
-          <Typography color="textSecondary">
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
+            <LightbulbIcon color="primary" />
+            <Typography variant="h6" sx={{ fontWeight: 600 }}>
+              Forecast Insights & Recommendations
+            </Typography>
+          </Box>
+          <Alert 
+            severity="info"
+            sx={{
+              borderRadius: 2,
+            }}
+          >
             Insufficient forecast data for analysis. Check back once more data is available.
-          </Typography>
+          </Alert>
         </CardContent>
       </Card>
     );
@@ -248,22 +273,69 @@ const ForecastSuggestions: React.FC<ForecastSuggestionsProps> = ({
   };
 
   return (
-    <Card>
+    <Card
+      elevation={2}
+      sx={{
+        borderRadius: 2,
+        height: '100%',
+        transition: 'transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out',
+        '&:hover': {
+          transform: 'translateY(-2px)',
+          boxShadow: 4,
+        },
+      }}
+    >
       <CardContent>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
-          <LightbulbIcon color="primary" />
-          <Typography variant="h6">Forecast Insights & Recommendations</Typography>
+          <LightbulbIcon 
+            color="primary" 
+            sx={{
+              animation: 'glow 2s ease-in-out infinite',
+              '@keyframes glow': {
+                '0%, 100%': { opacity: 1, filter: 'drop-shadow(0 0 5px rgba(25, 118, 210, 0.5))' },
+                '50%': { opacity: 0.8, filter: 'drop-shadow(0 0 10px rgba(25, 118, 210, 0.8))' },
+              },
+            }}
+          />
+          <Typography variant="h6" sx={{ fontWeight: 600 }}>
+            Forecast Insights & Recommendations
+          </Typography>
         </Box>
         <Divider sx={{ mb: 2 }} />
-        <List>
+        <List sx={{ p: 0 }}>
           {suggestions.map((suggestion, index) => (
-            <ListItem key={index} sx={{ px: 0, py: 1 }}>
+            <ListItem 
+              key={index} 
+              sx={{ 
+                px: 0, 
+                py: 1.5,
+                animation: `slideIn 0.5s ease-out ${index * 0.1}s both`,
+                '@keyframes slideIn': {
+                  from: {
+                    opacity: 0,
+                    transform: 'translateX(-10px)',
+                  },
+                  to: {
+                    opacity: 1,
+                    transform: 'translateX(0)',
+                  },
+                },
+              }}
+            >
               <Alert
                 severity={getSeverity(suggestion.type)}
                 icon={suggestion.icon}
-                sx={{ width: '100%' }}
+                sx={{ 
+                  width: '100%',
+                  borderRadius: 2,
+                  transition: 'all 0.3s ease',
+                  '&:hover': {
+                    transform: 'translateX(5px)',
+                    boxShadow: 2,
+                  },
+                }}
               >
-                <AlertTitle>{suggestion.title}</AlertTitle>
+                <AlertTitle sx={{ fontWeight: 600 }}>{suggestion.title}</AlertTitle>
                 {suggestion.message}
               </Alert>
             </ListItem>

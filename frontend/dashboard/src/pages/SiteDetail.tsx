@@ -16,6 +16,9 @@ import {
   DialogContent,
   DialogContentText,
   DialogActions,
+  Tabs,
+  Tab,
+  Fade,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import DeleteIcon from '@mui/icons-material/Delete';
@@ -83,6 +86,7 @@ const SiteDetail: React.FC = () => {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
+  const [currentTab, setCurrentTab] = useState(0);
 
   const { data: site, isLoading, error } = useQuery<Site>({
     queryKey: ['site', siteId],
@@ -245,169 +249,324 @@ const SiteDetail: React.FC = () => {
         <Chip label={`${site.capacity_mw} MW`} variant="outlined" />
       </Box>
 
-      <Grid container spacing={3}>
-        <Grid item xs={12} md={6}>
-          <Card>
-            <CardContent>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                <Typography variant="h6">
-                  Site Information
-                </Typography>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  startIcon={<EditIcon />}
-                  onClick={() => setEditDialogOpen(true)}
-                >
-                  Edit
-                </Button>
-              </Box>
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="body2" color="textSecondary">
-                  <strong>Type:</strong> {site.type}
-                </Typography>
-                <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
-                  <strong>Capacity:</strong> {site.capacity_mw} MW
-                </Typography>
-                <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
-                  <strong>Location:</strong> {site.latitude.toFixed(4)}, {site.longitude.toFixed(4)}
-                </Typography>
-                <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
-                  <strong>Timezone:</strong> {site.timezone}
-                </Typography>
-                {site.created_at && (
-                  <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
-                    <strong>Created:</strong>{' '}
-                    {new Date(site.created_at).toLocaleDateString()}
-                  </Typography>
-                )}
-              </Box>
-            </CardContent>
-          </Card>
-        </Grid>
+      {/* Tabbed Interface */}
+      <Card 
+        elevation={2}
+        sx={{ 
+          mb: 3,
+          borderRadius: 2,
+          overflow: 'hidden',
+        }}
+      >
+        <Tabs
+          value={currentTab}
+          onChange={(_, newValue) => setCurrentTab(newValue)}
+          variant="scrollable"
+          scrollButtons="auto"
+          sx={{
+            bgcolor: 'background.paper',
+            borderBottom: 1,
+            borderColor: 'divider',
+            '& .MuiTabs-indicator': {
+              height: 3,
+              borderRadius: '3px 3px 0 0',
+              transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+            },
+            '& .MuiTab-root': {
+              textTransform: 'none',
+              fontWeight: 600,
+              fontSize: '0.95rem',
+              minHeight: 64,
+              px: 3,
+              transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+              '&:hover': {
+                backgroundColor: 'action.hover',
+                color: 'primary.main',
+              },
+            },
+            '& .Mui-selected': {
+              color: 'primary.main',
+            },
+          }}
+        >
+          <Tab label="Overview" />
+          <Tab label="Forecast" />
+          <Tab label="Analytics" />
+          <Tab label="Planning" />
+          <Tab label="Alerts" />
+        </Tabs>
+      </Card>
 
-        <Grid item xs={12} md={6}>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" gutterBottom>
-                Location Map
-              </Typography>
-              <Box
-                sx={{
-                  mt: 2,
-                  height: 300,
-                  borderRadius: 1,
-                  overflow: 'hidden',
-                  border: '1px solid',
-                  borderColor: 'divider',
-                }}
-              >
-                <MapContainer
-                  center={[site.latitude, site.longitude]}
-                  zoom={13}
-                  style={{ height: '100%', width: '100%' }}
-                  scrollWheelZoom={false}
-                >
-                  <TileLayer
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                  />
-                  <Marker position={[site.latitude, site.longitude]}>
-                    <Popup>
-                      <strong>{site.name}</strong><br />
-                      {site.type} - {site.capacity_mw} MW<br />
-                      {site.latitude.toFixed(4)}, {site.longitude.toFixed(4)}
-                    </Popup>
-                  </Marker>
-                </MapContainer>
-              </Box>
-            </CardContent>
-          </Card>
-        </Grid>
+      {/* Tab Panels */}
+      <Box 
+        sx={{ 
+          position: 'relative', 
+          minHeight: 400,
+          '& > *': {
+            animation: 'fadeIn 0.3s ease-in',
+          },
+          '@keyframes fadeIn': {
+            from: {
+              opacity: 0,
+              transform: 'translateY(10px)',
+            },
+            to: {
+              opacity: 1,
+              transform: 'translateY(0)',
+            },
+          },
+        }}
+      >
+        {/* Overview Tab */}
+        {currentTab === 0 && (
+          <Fade in={currentTab === 0} timeout={300}>
+            <Grid container spacing={3}>
+              <Grid item xs={12} md={6}>
+                <Card>
+                  <CardContent>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                      <Typography variant="h6">
+                        Site Information
+                      </Typography>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        startIcon={<EditIcon />}
+                        onClick={() => setEditDialogOpen(true)}
+                      >
+                        Edit
+                      </Button>
+                    </Box>
+                    <Box sx={{ mt: 2 }}>
+                      <Typography variant="body2" color="textSecondary">
+                        <strong>Type:</strong> {site.type}
+                      </Typography>
+                      <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+                        <strong>Capacity:</strong> {site.capacity_mw} MW
+                      </Typography>
+                      <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+                        <strong>Location:</strong> {site.latitude.toFixed(4)}, {site.longitude.toFixed(4)}
+                      </Typography>
+                      <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+                        <strong>Timezone:</strong> {site.timezone}
+                      </Typography>
+                      {site.created_at && (
+                        <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+                          <strong>Created:</strong>{' '}
+                          {new Date(site.created_at).toLocaleDateString()}
+                        </Typography>
+                      )}
+                    </Box>
+                  </CardContent>
+                </Card>
+              </Grid>
 
-        <Grid item xs={12}>
-          <Card>
-            <CardContent>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 2 }}>
-                <Typography variant="h6">
-                  {forecastHorizon === '24h' ? '24-Hour' : 
-                   forecastHorizon === '48h' ? '48-Hour' : 
-                   forecastHorizon === '7d' ? '7-Day' : '30-Day'} Forecast
-                </Typography>
-                <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <ForecastHorizonToggle
-                    value={forecastHorizon}
-                    onChange={(horizon) => setForecastHorizon(horizon)}
-                  />
-                  <Button
-                    size="small"
-                    variant={autoRefresh ? 'contained' : 'outlined'}
-                    startIcon={<RefreshIcon />}
-                    onClick={() => {
-                      queryClient.invalidateQueries({ queryKey: ['forecast', site.id] });
-                      queryClient.invalidateQueries({ queryKey: ['forecast_accuracy', site.id] });
-                      queryClient.invalidateQueries({ queryKey: ['current_weather', site.id] });
-                      setLastUpdate(new Date());
+              <Grid item xs={12} md={6}>
+                <Card>
+                  <CardContent>
+                    <Typography variant="h6" gutterBottom>
+                      Location Map
+                    </Typography>
+                    <Box
+                      sx={{
+                        mt: 2,
+                        height: 300,
+                        borderRadius: 1,
+                        overflow: 'hidden',
+                        border: '1px solid',
+                        borderColor: 'divider',
+                      }}
+                    >
+                      <MapContainer
+                        center={[site.latitude, site.longitude]}
+                        zoom={13}
+                        style={{ height: '100%', width: '100%' }}
+                        scrollWheelZoom={false}
+                      >
+                        <TileLayer
+                          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                        />
+                        <Marker position={[site.latitude, site.longitude]}>
+                          <Popup>
+                            <strong>{site.name}</strong><br />
+                            {site.type} - {site.capacity_mw} MW<br />
+                            {site.latitude.toFixed(4)}, {site.longitude.toFixed(4)}
+                          </Popup>
+                        </Marker>
+                      </MapContainer>
+                    </Box>
+                  </CardContent>
+                </Card>
+              </Grid>
+
+              {/* Current Weather Display */}
+              <Grid item xs={12}>
+                <CurrentWeatherDisplay siteId={site.id} />
+              </Grid>
+            </Grid>
+          </Fade>
+        )}
+
+        {/* Forecast Tab */}
+        {currentTab === 1 && (
+          <Fade in={currentTab === 1} timeout={300}>
+            <Grid container spacing={3}>
+              {/* Main Forecast Chart */}
+              <Grid item xs={12}>
+                <Card 
+                  elevation={3}
+                  sx={{
+                    borderRadius: 2,
+                    overflow: 'hidden',
+                    transition: 'transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out',
+                    '&:hover': {
+                      transform: 'translateY(-2px)',
+                      boxShadow: 6,
+                    },
+                  }}
+                >
+                  <CardContent>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 2 }}>
+                      <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                        {forecastHorizon === '24h' ? '24-Hour' : 
+                         forecastHorizon === '48h' ? '48-Hour' : 
+                         forecastHorizon === '7d' ? '7-Day' : '30-Day'} Power Forecast
+                      </Typography>
+                      <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <ForecastHorizonToggle
+                          value={forecastHorizon}
+                          onChange={(horizon) => setForecastHorizon(horizon)}
+                        />
+                        <Button
+                          size="small"
+                          variant={autoRefresh ? 'contained' : 'outlined'}
+                          startIcon={<RefreshIcon />}
+                          onClick={() => {
+                            queryClient.invalidateQueries({ queryKey: ['forecast', site.id] });
+                            queryClient.invalidateQueries({ queryKey: ['forecast_accuracy', site.id] });
+                            queryClient.invalidateQueries({ queryKey: ['current_weather', site.id] });
+                            setLastUpdate(new Date());
+                          }}
+                        >
+                          Refresh
+                        </Button>
+                        <Button
+                          size="small"
+                          variant={autoRefresh ? 'contained' : 'outlined'}
+                          onClick={() => setAutoRefresh(!autoRefresh)}
+                        >
+                          {autoRefresh ? 'Auto: ON' : 'Auto: OFF'}
+                        </Button>
+                        <ExportButton
+                          siteId={site.id}
+                          exportType="forecast"
+                          horizon={forecastHorizon}
+                        />
+                      </Box>
+                    </Box>
+                    <Box sx={{ mt: 2 }}>
+                      <ForecastChart 
+                        siteId={site.id} 
+                        horizon={forecastHorizon === '24h' ? 24 : 
+                                 forecastHorizon === '48h' ? 48 : 
+                                 forecastHorizon === '7d' ? 168 : 720} 
+                        showConfidence={true} 
+                      />
+                    </Box>
+                  </CardContent>
+                </Card>
+              </Grid>
+
+              {/* Forecast Accuracy Metrics and Insights - Side by Side */}
+              <Grid item xs={12} md={6}>
+                <Fade in={currentTab === 1} timeout={500} style={{ transitionDelay: '100ms' }}>
+                  <Box
+                    sx={{
+                      animation: 'slideInLeft 0.5s ease-out',
+                      '@keyframes slideInLeft': {
+                        from: {
+                          opacity: 0,
+                          transform: 'translateX(-20px)',
+                        },
+                        to: {
+                          opacity: 1,
+                          transform: 'translateX(0)',
+                        },
+                      },
                     }}
                   >
-                    Refresh
-                  </Button>
-                  <Button
-                    size="small"
-                    variant={autoRefresh ? 'contained' : 'outlined'}
-                    onClick={() => setAutoRefresh(!autoRefresh)}
+                    <ForecastAccuracyMetrics
+                      siteId={site.id}
+                      days={30}
+                      horizon={forecastHorizon}
+                    />
+                  </Box>
+                </Fade>
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <Fade in={currentTab === 1} timeout={500} style={{ transitionDelay: '200ms' }}>
+                  <Box
+                    sx={{
+                      animation: 'slideInRight 0.5s ease-out',
+                      '@keyframes slideInRight': {
+                        from: {
+                          opacity: 0,
+                          transform: 'translateX(20px)',
+                        },
+                        to: {
+                          opacity: 1,
+                          transform: 'translateX(0)',
+                        },
+                      },
+                    }}
                   >
-                    {autoRefresh ? 'Auto: ON' : 'Auto: OFF'}
-                  </Button>
-                  <ExportButton
-                    siteId={site.id}
-                    exportType="forecast"
-                    horizon={forecastHorizon}
-                  />
-                </Box>
-              </Box>
-              <Box sx={{ mt: 2 }}>
-                <ForecastChart 
-                  siteId={site.id} 
-                  horizon={forecastHorizon === '24h' ? 24 : 
-                           forecastHorizon === '48h' ? 48 : 
-                           forecastHorizon === '7d' ? 168 : 720} 
-                  showConfidence={true} 
-                />
-              </Box>
-            </CardContent>
-          </Card>
-        </Grid>
+                    <ForecastSuggestions
+                      siteId={site.id}
+                      horizon={forecastHorizon === '24h' ? 24 : 
+                               forecastHorizon === '48h' ? 48 : 
+                               forecastHorizon === '7d' ? 168 : 720}
+                      siteType={site.type}
+                      capacityMw={site.capacity_mw}
+                    />
+                  </Box>
+                </Fade>
+              </Grid>
 
-        {/* Current Weather Display */}
-        <Grid item xs={12}>
-          <CurrentWeatherDisplay siteId={site.id} />
-        </Grid>
+              {/* Forecast Analytics Dashboard */}
+              <Grid item xs={12}>
+                <Fade in={currentTab === 1} timeout={500} style={{ transitionDelay: '300ms' }}>
+                  <Box
+                    sx={{
+                      animation: 'fadeInUp 0.5s ease-out',
+                      '@keyframes fadeInUp': {
+                        from: {
+                          opacity: 0,
+                          transform: 'translateY(20px)',
+                        },
+                        to: {
+                          opacity: 1,
+                          transform: 'translateY(0)',
+                        },
+                      },
+                    }}
+                  >
+                    <ForecastAnalyticsDashboard siteId={site.id} />
+                  </Box>
+                </Fade>
+              </Grid>
+            </Grid>
+          </Fade>
+        )}
 
-        {/* Forecast Accuracy Metrics */}
-        <Grid item xs={12}>
-          <ForecastAccuracyMetrics
-            siteId={site.id}
-            days={30}
-            horizon={forecastHorizon}
-          />
-        </Grid>
-
-        {/* Forecast Suggestions */}
-        <Grid item xs={12}>
-          <ForecastSuggestions
-            siteId={site.id}
-            horizon={forecastHorizon === '24h' ? 24 : 
-                     forecastHorizon === '48h' ? 48 : 
-                     forecastHorizon === '7d' ? 168 : 720}
-            siteType={site.type}
-            capacityMw={site.capacity_mw}
-          />
-        </Grid>
-
-        {/* Performance Metrics */}
-        <Grid item xs={12}>
-          <Card>
+        {/* Analytics Tab */}
+        {currentTab === 2 && (
+          <Fade in={currentTab === 2} timeout={300}>
+            <Grid container spacing={3}>
+              {/* Performance Metrics */}
+              <Grid item xs={12}>
+                <Card>
             <CardContent>
               <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
                 <Typography variant="h6">
@@ -509,92 +668,103 @@ const SiteDetail: React.FC = () => {
           </Card>
         </Grid>
 
-        {/* Historical Weather Chart */}
-        <Grid item xs={12}>
-          <Card>
-            <CardContent>
-              <WeatherHistoryChart siteId={site.id} days={7} />
-            </CardContent>
-          </Card>
-        </Grid>
+              {/* Historical Weather Chart */}
+              <Grid item xs={12}>
+                <Card>
+                  <CardContent>
+                    <WeatherHistoryChart siteId={site.id} days={7} />
+                  </CardContent>
+                </Card>
+              </Grid>
 
-        {/* Production History Chart */}
-        <Grid item xs={12}>
-          <Card>
-            <CardContent>
-              <ProductionHistoryChart siteId={site.id} days={7} />
-            </CardContent>
-          </Card>
-        </Grid>
+              {/* Production History Chart */}
+              <Grid item xs={12}>
+                <Card>
+                  <CardContent>
+                    <ProductionHistoryChart siteId={site.id} days={7} />
+                  </CardContent>
+                </Card>
+              </Grid>
 
-        {/* AI-Powered Insights */}
-        <Grid item xs={12}>
-          <AIPoweredInsights siteId={site.id} horizon={forecastHorizon} />
-        </Grid>
+              {/* AI-Powered Insights */}
+              <Grid item xs={12}>
+                <AIPoweredInsights siteId={site.id} horizon={forecastHorizon} />
+              </Grid>
+            </Grid>
+          </Fade>
+        )}
 
-        {/* Forecast Analytics Dashboard */}
-        <Grid item xs={12}>
-          <ForecastAnalyticsDashboard siteId={site.id} />
-        </Grid>
+        {/* Planning Tab */}
+        {currentTab === 3 && (
+          <Fade in={currentTab === 3} timeout={300}>
+            <Grid container spacing={3}>
+              {/* Technology Recommendation Analysis */}
+              <Grid item xs={12}>
+                <TechnologyRecommendation siteId={site.id} days={365} />
+              </Grid>
 
-        {/* Technology Recommendation Analysis */}
-        <Grid item xs={12}>
-          <TechnologyRecommendation siteId={site.id} days={365} />
-        </Grid>
+              {/* Production Scheduling Panel */}
+              <Grid item xs={12}>
+                <ProductionSchedulingPanel
+                  siteId={site.id}
+                  horizon={forecastHorizon}
+                />
+              </Grid>
 
-        {/* Interactive Forecast Adjustments */}
-        <Grid item xs={12}>
-          <InteractiveForecastAdjustments
-            siteId={site.id}
-            horizon={forecastHorizon === '24h' ? 24 : 
-                     forecastHorizon === '48h' ? 48 : 
-                     forecastHorizon === '7d' ? 168 : 720}
-          />
-        </Grid>
+              {/* Interactive Forecast Adjustments */}
+              <Grid item xs={12}>
+                <InteractiveForecastAdjustments
+                  siteId={site.id}
+                  horizon={forecastHorizon === '24h' ? 24 : 
+                           forecastHorizon === '48h' ? 48 : 
+                           forecastHorizon === '7d' ? 168 : 720}
+                />
+              </Grid>
 
-        {/* Production Scheduling Panel */}
-        <Grid item xs={12}>
-          <ProductionSchedulingPanel
-            siteId={site.id}
-            horizon={forecastHorizon}
-          />
-        </Grid>
+              {/* Forecast Comparison Panel */}
+              <Grid item xs={12}>
+                <ForecastComparisonPanel
+                  siteId={site.id}
+                  horizon={forecastHorizon === '24h' ? 24 : 
+                           forecastHorizon === '48h' ? 48 : 
+                           forecastHorizon === '7d' ? 168 : 720}
+                />
+              </Grid>
+            </Grid>
+          </Fade>
+        )}
 
-        {/* Forecast Comparison Panel */}
-        <Grid item xs={12}>
-          <ForecastComparisonPanel
-            siteId={site.id}
-            horizon={forecastHorizon === '24h' ? 24 : 
-                     forecastHorizon === '48h' ? 48 : 
-                     forecastHorizon === '7d' ? 168 : 720}
-          />
-        </Grid>
-
-        {/* Active Alerts Panel */}
-        <Grid item xs={12}>
-          <Card>
-            <CardContent>
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                <Typography variant="h6">
-                  Active Alerts
-                </Typography>
-                <Button
-                  variant="contained"
-                  size="small"
-                  onClick={() => setCreateAlertDialogOpen(true)}
-                >
-                  Create Alert
-                </Button>
-              </Box>
-              <AlertsPanel
-                siteId={site.id}
-                maxAlerts={5}
-                showAcknowledge={true}
-              />
-            </CardContent>
-          </Card>
-        </Grid>
-      </Grid>
+        {/* Alerts Tab */}
+        {currentTab === 4 && (
+          <Fade in={currentTab === 4} timeout={300}>
+            <Grid container spacing={3}>
+              <Grid item xs={12}>
+                <Card>
+                  <CardContent>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                      <Typography variant="h6">
+                        Active Alerts
+                      </Typography>
+                      <Button
+                        variant="contained"
+                        size="small"
+                        onClick={() => setCreateAlertDialogOpen(true)}
+                      >
+                        Create Alert
+                      </Button>
+                    </Box>
+                    <AlertsPanel
+                      siteId={site.id}
+                      maxAlerts={10}
+                      showAcknowledge={true}
+                    />
+                  </CardContent>
+                </Card>
+              </Grid>
+            </Grid>
+          </Fade>
+        )}
+      </Box>
 
       {/* Last Update Indicator */}
       {autoRefresh && (

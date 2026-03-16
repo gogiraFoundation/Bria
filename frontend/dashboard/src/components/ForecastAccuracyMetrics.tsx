@@ -127,12 +127,33 @@ const ForecastAccuracyMetrics: React.FC<ForecastAccuracyMetricsProps> = ({
 
   if (!accuracy || accuracy.data_points === 0) {
     return (
-      <Card>
+      <Card
+        elevation={2}
+        sx={{
+          borderRadius: 2,
+          height: '100%',
+          transition: 'transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out',
+          '&:hover': {
+            transform: 'translateY(-2px)',
+            boxShadow: 4,
+          },
+        }}
+      >
         <CardContent>
-          <Typography variant="h6" gutterBottom>
+          <Typography variant="h6" gutterBottom sx={{ fontWeight: 600, mb: 2 }}>
             Forecast Accuracy Metrics
           </Typography>
-          <Alert severity="info">
+          <Alert 
+            severity="info"
+            sx={{
+              borderRadius: 2,
+              animation: 'pulse 2s ease-in-out infinite',
+              '@keyframes pulse': {
+                '0%, 100%': { opacity: 1 },
+                '50%': { opacity: 0.8 },
+              },
+            }}
+          >
             No accuracy data available. Accuracy metrics will appear once forecast vs actual comparisons are available.
           </Alert>
         </CardContent>
@@ -141,7 +162,18 @@ const ForecastAccuracyMetrics: React.FC<ForecastAccuracyMetricsProps> = ({
   }
 
   return (
-    <Card>
+    <Card
+      elevation={2}
+      sx={{
+        borderRadius: 2,
+        height: '100%',
+        transition: 'transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out',
+        '&:hover': {
+          transform: 'translateY(-2px)',
+          boxShadow: 4,
+        },
+      }}
+    >
       <CardContent>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
           <Typography variant="h6">
@@ -186,16 +218,44 @@ const ForecastAccuracyMetrics: React.FC<ForecastAccuracyMetricsProps> = ({
         <Grid container spacing={2}>
           {/* MAE */}
           <Grid item xs={12} sm={6} md={3}>
-            <Box sx={{ textAlign: 'center', p: 2, bgcolor: 'primary.light', borderRadius: 1 }}>
-              <AssessmentIcon sx={{ fontSize: 40, color: 'primary.main', mb: 1 }} />
-              <Typography variant="h5" color="primary.main">
+            <Box 
+              sx={{ 
+                textAlign: 'center', 
+                p: 2.5, 
+                bgcolor: 'primary.light', 
+                borderRadius: 2,
+                transition: 'all 0.3s ease',
+                '&:hover': {
+                  bgcolor: 'primary.main',
+                  transform: 'scale(1.05)',
+                  '& .MuiTypography-root': {
+                    color: 'white',
+                  },
+                  '& .MuiSvgIcon-root': {
+                    color: 'white',
+                  },
+                },
+              }}
+            >
+              <AssessmentIcon 
+                sx={{ 
+                  fontSize: 40, 
+                  color: 'primary.main', 
+                  mb: 1,
+                  transition: 'transform 0.3s ease',
+                  '&:hover': {
+                    transform: 'rotate(5deg) scale(1.1)',
+                  },
+                }} 
+              />
+              <Typography variant="h5" color="primary.main" sx={{ fontWeight: 600, transition: 'color 0.3s ease' }}>
                 {accuracy.mae !== null ? `${accuracy.mae.toFixed(1)} kW` : 'N/A'}
               </Typography>
-              <Typography variant="body2" color="textSecondary">
+              <Typography variant="body2" color="textSecondary" sx={{ mt: 0.5 }}>
                 MAE (Mean Absolute Error)
               </Typography>
               {accuracy.recent_7d.mae !== null && (
-                <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5 }}>
+                <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5, display: 'block' }}>
                   Recent: {accuracy.recent_7d.mae.toFixed(1)} kW
                 </Typography>
               )}
@@ -204,16 +264,44 @@ const ForecastAccuracyMetrics: React.FC<ForecastAccuracyMetricsProps> = ({
 
           {/* RMSE */}
           <Grid item xs={12} sm={6} md={3}>
-            <Box sx={{ textAlign: 'center', p: 2, bgcolor: 'info.light', borderRadius: 1 }}>
-              <AssessmentIcon sx={{ fontSize: 40, color: 'info.main', mb: 1 }} />
-              <Typography variant="h5" color="info.main">
+            <Box 
+              sx={{ 
+                textAlign: 'center', 
+                p: 2.5, 
+                bgcolor: 'info.light', 
+                borderRadius: 2,
+                transition: 'all 0.3s ease',
+                '&:hover': {
+                  bgcolor: 'info.main',
+                  transform: 'scale(1.05)',
+                  '& .MuiTypography-root': {
+                    color: 'white',
+                  },
+                  '& .MuiSvgIcon-root': {
+                    color: 'white',
+                  },
+                },
+              }}
+            >
+              <AssessmentIcon 
+                sx={{ 
+                  fontSize: 40, 
+                  color: 'info.main', 
+                  mb: 1,
+                  transition: 'transform 0.3s ease',
+                  '&:hover': {
+                    transform: 'rotate(5deg) scale(1.1)',
+                  },
+                }} 
+              />
+              <Typography variant="h5" color="info.main" sx={{ fontWeight: 600, transition: 'color 0.3s ease' }}>
                 {accuracy.rmse !== null ? `${accuracy.rmse.toFixed(1)} kW` : 'N/A'}
               </Typography>
-              <Typography variant="body2" color="textSecondary">
+              <Typography variant="body2" color="textSecondary" sx={{ mt: 0.5 }}>
                 RMSE (Root Mean Square Error)
               </Typography>
               {accuracy.recent_7d.rmse !== null && (
-                <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5 }}>
+                <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5, display: 'block' }}>
                   Recent: {accuracy.recent_7d.rmse.toFixed(1)} kW
                 </Typography>
               )}
@@ -222,16 +310,44 @@ const ForecastAccuracyMetrics: React.FC<ForecastAccuracyMetricsProps> = ({
 
           {/* MAPE */}
           <Grid item xs={12} sm={6} md={3}>
-            <Box sx={{ textAlign: 'center', p: 2, bgcolor: 'warning.light', borderRadius: 1 }}>
-              <AssessmentIcon sx={{ fontSize: 40, color: 'warning.main', mb: 1 }} />
-              <Typography variant="h5" color="warning.main">
+            <Box 
+              sx={{ 
+                textAlign: 'center', 
+                p: 2.5, 
+                bgcolor: 'warning.light', 
+                borderRadius: 2,
+                transition: 'all 0.3s ease',
+                '&:hover': {
+                  bgcolor: 'warning.main',
+                  transform: 'scale(1.05)',
+                  '& .MuiTypography-root': {
+                    color: 'white',
+                  },
+                  '& .MuiSvgIcon-root': {
+                    color: 'white',
+                  },
+                },
+              }}
+            >
+              <AssessmentIcon 
+                sx={{ 
+                  fontSize: 40, 
+                  color: 'warning.main', 
+                  mb: 1,
+                  transition: 'transform 0.3s ease',
+                  '&:hover': {
+                    transform: 'rotate(5deg) scale(1.1)',
+                  },
+                }} 
+              />
+              <Typography variant="h5" color="warning.main" sx={{ fontWeight: 600, transition: 'color 0.3s ease' }}>
                 {accuracy.mape !== null ? `${accuracy.mape.toFixed(1)}%` : 'N/A'}
               </Typography>
-              <Typography variant="body2" color="textSecondary">
+              <Typography variant="body2" color="textSecondary" sx={{ mt: 0.5 }}>
                 MAPE (Mean Absolute % Error)
               </Typography>
               {accuracy.recent_7d.mape !== null && (
-                <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5 }}>
+                <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5, display: 'block' }}>
                   Recent: {accuracy.recent_7d.mape.toFixed(1)}%
                 </Typography>
               )}
@@ -240,16 +356,44 @@ const ForecastAccuracyMetrics: React.FC<ForecastAccuracyMetricsProps> = ({
 
           {/* Bias */}
           <Grid item xs={12} sm={6} md={3}>
-            <Box sx={{ textAlign: 'center', p: 2, bgcolor: 'secondary.light', borderRadius: 1 }}>
-              <AssessmentIcon sx={{ fontSize: 40, color: 'secondary.main', mb: 1 }} />
-              <Typography variant="h5" color="secondary.main">
+            <Box 
+              sx={{ 
+                textAlign: 'center', 
+                p: 2.5, 
+                bgcolor: 'secondary.light', 
+                borderRadius: 2,
+                transition: 'all 0.3s ease',
+                '&:hover': {
+                  bgcolor: 'secondary.main',
+                  transform: 'scale(1.05)',
+                  '& .MuiTypography-root': {
+                    color: 'white',
+                  },
+                  '& .MuiSvgIcon-root': {
+                    color: 'white',
+                  },
+                },
+              }}
+            >
+              <AssessmentIcon 
+                sx={{ 
+                  fontSize: 40, 
+                  color: 'secondary.main', 
+                  mb: 1,
+                  transition: 'transform 0.3s ease',
+                  '&:hover': {
+                    transform: 'rotate(5deg) scale(1.1)',
+                  },
+                }} 
+              />
+              <Typography variant="h5" color="secondary.main" sx={{ fontWeight: 600, transition: 'color 0.3s ease' }}>
                 {accuracy.bias !== null ? `${accuracy.bias > 0 ? '+' : ''}${accuracy.bias.toFixed(1)} kW` : 'N/A'}
               </Typography>
-              <Typography variant="body2" color="textSecondary">
+              <Typography variant="body2" color="textSecondary" sx={{ mt: 0.5 }}>
                 Bias (Over/Under Forecast)
               </Typography>
               {accuracy.bias !== null && (
-                <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5 }}>
+                <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5, display: 'block' }}>
                   {accuracy.bias > 0 ? 'Over-forecasting' : accuracy.bias < 0 ? 'Under-forecasting' : 'Neutral'}
                 </Typography>
               )}
