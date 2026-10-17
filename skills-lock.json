@@ -35,6 +35,22 @@
       "sourceRef": "v0.3.1",
       "computedHash": "d64c2b7a497aff8b48e4e70432e274267cc201be67c3be8e2852f506d02f68de",
       "cursorLink": "blocked-EPERM-create-.cursor; agents-only for now"
+    },
+    "gha-security-review": {
+      "source": "getsentry/skills",
+      "sourceType": "github",
+      "sourceRef": "f57ada2d0b640406ea7e25b11d636c530e77c58b",
+      "skillPath": "skills/gha-security-review/SKILL.md",
+      "computedHash": "b75c6c43ff99c82b3cf44519bd30723917de97064f225e392ecfd6fdcd7455bd",
+      "phase": 2
+    },
+    "statsmodels": {
+      "source": "K-Dense-AI/scientific-agent-skills",
+      "sourceType": "github",
+      "sourceRef": "a1043ef544e3a100c28e70a736b6cf32554d0677",
+      "skillPath": "skills/statsmodels/SKILL.md",
+      "computedHash": "9e6c034bb4acbf0972fda18892d2feea907885ac5ad7194d220182d8810295a3",
+      "phase": 2
     }
   }
 }
