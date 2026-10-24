@@ -1,7 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Container,
   Grid,
   Card,
   CardContent,
@@ -26,6 +25,9 @@ import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 import ForecastChart from '../components/charts/ForecastChartSimple';
 import ForecastComparisonChart from '../components/charts/ForecastComparisonChart';
+import PageHeader from '../components/ui/PageHeader';
+import EmptyState from '../components/ui/EmptyState';
+import ForecastStatusChip from '../components/ForecastStatusChip';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
 
@@ -72,20 +74,26 @@ const ForecastsOverview: React.FC = () => {
 
   if (isLoading) {
     return (
-      <Container maxWidth="lg" sx={{ mt: 4, mb: 4, textAlign: 'center' }}>
-        <CircularProgress />
-        <Typography sx={{ mt: 2 }}>Loading forecasts...</Typography>
-      </Container>
+      <Box>
+        <PageHeader title="Forecasts" subtitle="Generation forecasts across sites" />
+        <Box sx={{ textAlign: 'center', py: 8 }}>
+          <CircularProgress />
+          <Typography sx={{ mt: 2 }} color="text.secondary">
+            Loading forecasts…
+          </Typography>
+        </Box>
+      </Box>
     );
   }
 
   if (error) {
     return (
-      <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
+      <Box>
+        <PageHeader title="Forecasts" />
         <Alert severity="error">
           Error loading sites: {error instanceof Error ? error.message : 'Unknown error'}
         </Alert>
-      </Container>
+      </Box>
     );
   }
 
@@ -107,42 +115,36 @@ const ForecastsOverview: React.FC = () => {
 
   if (!sites || sites.length === 0) {
     return (
-      <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-        <Typography variant="h4" gutterBottom>
-          Forecasts Overview
-        </Typography>
-        <Box sx={{ mt: 4, textAlign: 'center' }}>
-          <Typography variant="h6" color="textSecondary" gutterBottom>
-            No sites found
-          </Typography>
-          <Typography color="textSecondary" sx={{ mb: 2 }}>
-            Create a site to view forecasts.
-          </Typography>
-          <Button
-            variant="contained"
-            onClick={() => navigate('/')}
-          >
-            Go to Sites
-          </Button>
-        </Box>
-      </Container>
+      <Box>
+        <PageHeader title="Forecasts" subtitle="Generation forecasts across sites" />
+        <EmptyState
+          title="No sites to forecast"
+          body="Create a site first, then return here to review generation forecasts."
+          action={
+            <Button variant="contained" onClick={() => navigate('/')}>
+              Go to Sites
+            </Button>
+          }
+        />
+      </Box>
     );
   }
 
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Typography variant="h4">
-          Forecasts Overview
-        </Typography>
-        <Button
-          variant={viewMode === 'comparison' ? 'contained' : 'outlined'}
-          startIcon={<CompareArrowsIcon />}
-          onClick={() => setViewMode(viewMode === 'overview' ? 'comparison' : 'overview')}
-        >
-          {viewMode === 'overview' ? 'Compare Forecasts' : 'Back to Overview'}
-        </Button>
-      </Box>
+    <Box>
+      <PageHeader
+        title="Forecasts"
+        subtitle="Generation forecasts across sites"
+        primaryAction={
+          <Button
+            variant={viewMode === 'comparison' ? 'contained' : 'outlined'}
+            startIcon={<CompareArrowsIcon />}
+            onClick={() => setViewMode(viewMode === 'overview' ? 'comparison' : 'overview')}
+          >
+            {viewMode === 'overview' ? 'Compare forecasts' : 'Back to overview'}
+          </Button>
+        }
+      />
 
       <Tabs value={viewMode === 'overview' ? 0 : 1} onChange={(_: React.SyntheticEvent, val: number) => setViewMode(val === 0 ? 'overview' : 'comparison')} sx={{ mb: 3 }}>
         <Tab label="Overview" />
@@ -177,21 +179,22 @@ const ForecastsOverview: React.FC = () => {
                     <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                       <Box>
                         <Typography variant="h6">{site.name}</Typography>
-                        <Box sx={{ mt: 1, display: 'flex', gap: 1 }}>
+                        <Box sx={{ mt: 1, display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
                           <Chip
                             label={site.type.toUpperCase()}
                             size="small"
                             color={site.type === 'solar' ? 'primary' : site.type === 'wind' ? 'secondary' : 'default'}
                           />
                           <Chip label={`${site.capacity_mw} MW`} size="small" variant="outlined" />
+                          <ForecastStatusChip siteId={site.id} horizon={24} />
                         </Box>
                       </Box>
                       <Button
                         variant="outlined"
                         startIcon={<TrendingUpIcon />}
-                        onClick={() => navigate(`/sites/${site.id}`)}
+                        onClick={() => navigate(`/sites/${site.id}?tab=1`)}
                       >
-                        View Details
+                        Open forecast
                       </Button>
                     </Box>
                     <Box sx={{ mt: 2 }}>
@@ -320,7 +323,7 @@ const ForecastsOverview: React.FC = () => {
           </Grid>
         </>
       )}
-    </Container>
+    </Box>
   );
 };
 

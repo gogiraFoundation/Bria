@@ -73,6 +73,21 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 db_pool: Optional[asyncpg.Pool] = None
 redis_client: Optional[redis.Redis] = None
 global_cache_manager: Optional[CacheManager] = None
+# In-process fallback when Redis is unavailable (dev / single-worker)
+_scenario_store: dict = {}
+
+
+def _database_target_for_logs(database_url: str) -> str:
+    """Host:port/db without credentials, for safe logging."""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(database_url)
+        host = parsed.hostname or "unknown"
+        port = parsed.port or 5432
+        db = (parsed.path or "/").lstrip("/") or "unknown"
+        return f"{host}:{port}/{db}"
+    except Exception:
+        return "unparseable"
 
 
 @app.on_event("startup")
@@ -80,6 +95,8 @@ async def startup():
     """Initialize connections on startup"""
     global db_pool, redis_client
     
+    db_target = _database_target_for_logs(settings.DATABASE_URL)
+
     # Database connection pool (optional - service can run without it)
     try:
         db_pool = await asyncpg.create_pool(
@@ -88,17 +105,22 @@ async def startup():
             max_size=10
         )
         app.state.db_pool = db_pool
-        logger.info("Database connection pool created")
+        logger.info("Database connection pool created", database=db_target)
     except asyncpg.exceptions.InvalidPasswordError as e:
-        logger.warning(f"Database authentication failed - check DATABASE_URL password in .env")
+        logger.warning(
+            "Database authentication failed - check DATABASE_URL password in .env",
+            database=db_target,
+        )
         app.state.db_pool = None
     except Exception as e:
-        logger.warning(f"Database connection failed (service will run in degraded mode): {e}")
+        logger.warning(
+            f"Database connection failed (service will run in degraded mode): {e}",
+            database=db_target,
+        )
         app.state.db_pool = None
     
-    # Redis client (optional)
+    # Redis client (optional). Do not strip credentials on failure.
     try:
-        # Try connecting with the provided URL
         redis_client = await redis.from_url(
             settings.REDIS_URL,
             decode_responses=True,
@@ -108,32 +130,9 @@ async def startup():
         app.state.redis_client = redis_client
         logger.info("Redis connection established")
     except Exception as e:
-        # If connection fails and URL contains password, try without password
-        if 'password' in settings.REDIS_URL.lower() or '@' in settings.REDIS_URL:
-            try:
-                # Extract host and port, remove password
-                import re
-                match = re.match(r'redis://(?:[^:]+:[^@]+@)?([^:]+):(\d+)', settings.REDIS_URL)
-                if match:
-                    host, port = match.groups()
-                    redis_client = await redis.from_url(
-                        f'redis://{host}:{port}',
-                        decode_responses=True,
-                        socket_connect_timeout=2
-                    )
-                    await redis_client.ping()
-                    app.state.redis_client = redis_client
-                    logger.info("Redis connection established (without password)")
-                else:
-                    raise
-            except Exception as e2:
-                logger.warning(f"Redis connection failed (service will run without caching): {e2}")
-                redis_client = None
-                app.state.redis_client = None
-        else:
-            logger.warning(f"Redis connection failed (service will run without caching): {e}")
-            redis_client = None
-            app.state.redis_client = None
+        logger.warning(f"Redis connection failed (service will run without caching): {e}")
+        redis_client = None
+        app.state.redis_client = None
     
     # Initialize cache manager
     global_cache_manager = CacheManager(redis_client=redis_client)
@@ -226,6 +225,13 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         return dict(user)
 
 
+# Wrapper dependency so tests can monkeypatch `get_current_user` at runtime.
+# FastAPI evaluates `Depends(...)` at import time, but this function calls the
+# current global `get_current_user` when the request executes.
+async def current_user_dependency(token: str = Depends(oauth2_scheme)) -> dict:
+    return await get_current_user(token)
+
+
 # Health check
 @app.get("/api/v1/health")
 async def health_check():
@@ -274,7 +280,13 @@ class ChangePasswordRequest(BaseModel):
 # Authentication endpoints
 @app.post("/api/v1/auth/register")
 async def register(request: RegisterRequest):
-    """Register a new user"""
+    """Register a new user (disabled unless ALLOW_PUBLIC_REGISTRATION is true)."""
+    if not getattr(settings, "ALLOW_PUBLIC_REGISTRATION", False):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public registration is disabled"
+        )
+
     if not db_pool:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -296,17 +308,17 @@ async def register(request: RegisterRequest):
             
             # Generate username if not provided
             username = request.username or request.email.split('@')[0]
-            
-            # Get or create default tenant
-            tenant = await conn.fetchrow(
-                "SELECT id FROM tenants WHERE name = 'default' LIMIT 1"
+
+            # Each public registrant gets a dedicated tenant (never shared "default")
+            tenant_name = f"org-{username}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            tenant_id = await conn.fetchval(
+                """
+                INSERT INTO tenants (name, created_at)
+                VALUES ($1, NOW())
+                RETURNING id
+                """,
+                tenant_name,
             )
-            if not tenant:
-                tenant_id = await conn.fetchval(
-                    "INSERT INTO tenants (name, created_at) VALUES ('default', NOW()) RETURNING id"
-                )
-            else:
-                tenant_id = tenant['id']
             
             # Create user
             user_id = await conn.fetchval(
@@ -322,15 +334,18 @@ async def register(request: RegisterRequest):
                 tenant_id
             )
             
-            # Create access token
-            access_token = create_access_token(data={"sub": str(user_id)})
+            # Create access token (role claim for shell nav gating)
+            access_token = create_access_token(
+                data={"sub": str(user_id), "role": "user"}
+            )
             
             return {
                 "access_token": access_token,
                 "token_type": "bearer",
                 "user_id": str(user_id),
                 "email": request.email,
-                "username": username
+                "username": username,
+                "role": "user",
             }
     except HTTPException:
         raise
@@ -405,9 +420,16 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
                 detail="Incorrect email or password. Please check your credentials."
             )
         
-        access_token = create_access_token(data={"sub": str(user['id'])})
+        role = user.get("role") or "user"
+        access_token = create_access_token(
+            data={"sub": str(user["id"]), "role": role}
+        )
         logger.info("Login successful", email=form_data.username, user_id=str(user['id']))
-        return {"access_token": access_token, "token_type": "bearer"}
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "role": role,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -416,6 +438,17 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred during login. Please try again."
         )
+
+
+@app.get("/api/v1/auth/me")
+async def auth_me(current_user: dict = Depends(current_user_dependency)):
+    """Return the authenticated user's profile for shell nav and account UI."""
+    return {
+        "id": str(current_user["id"]),
+        "email": current_user.get("email"),
+        "role": current_user.get("role") or "user",
+        "tenant_id": str(current_user["tenant_id"]) if current_user.get("tenant_id") is not None else None,
+    }
 
 
 # Sites endpoints
@@ -427,7 +460,7 @@ async def get_sites(
     group_by: Optional[str] = None,  # 'technology', 'location', 'output'
     sort_by: Optional[str] = None,  # 'name', 'type', 'capacity_mw', 'created_at', 'latitude', 'longitude'
     sort_order: Optional[str] = 'asc',  # 'asc' or 'desc'
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(current_user_dependency)
 ):
     """Get all sites for current user's tenant with optional grouping and sorting"""
     if not db_pool:
@@ -436,7 +469,8 @@ async def get_sites(
             detail="Database not available"
         )
     
-    async with db_pool.acquire() as conn:
+    conn = await db_pool.acquire()
+    try:
         # Build ORDER BY clause
         order_by = "created_at DESC"  # Default
         if sort_by:
@@ -498,6 +532,14 @@ async def get_sites(
             }
         
         return sites_list
+    finally:
+        release = getattr(db_pool, "release", None)
+        if release:
+            try:
+                await release(conn)
+            except Exception:
+                # Test doubles may not implement release; ignore.
+                pass
 
 
 @app.get("/api/v1/sites/{site_id}")
@@ -718,39 +760,22 @@ async def get_site_status(
 @monitor_request("create_site")
 async def create_site(
     site: CreateSiteRequest,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(current_user_dependency)
 ):
-    """Create new site"""
+    """Create new site via shared repository."""
     if not db_pool:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database not available"
         )
-    
-    import json
-    
-    # Convert dicts to JSON strings for JSONB fields
-    pv_params_json = json.dumps(site.pv_params) if site.pv_params else None
-    turbine_params_json = json.dumps(site.turbine_params) if site.turbine_params else None
-    
-    async with db_pool.acquire() as conn:
-        site_id = await conn.fetchval(
-            """
-            INSERT INTO sites (name, type, latitude, longitude, capacity_mw, timezone, tenant_id, pv_params, turbine_params)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
-            RETURNING id
-            """,
-            site.name,
-            site.type.value,
-            site.latitude,
-            site.longitude,
-            site.capacity_mw,
-            site.timezone,
-            current_user['tenant_id'],
-            pv_params_json,
-            turbine_params_json
-        )
-        return {"id": str(site_id), "status": "created"}
+
+    from core.repositories import create_site as repo_create_site
+    from core.database import set_db_pool
+
+    # Ensure repository uses the gateway pool
+    set_db_pool(db_pool)
+    created = await repo_create_site(str(current_user["tenant_id"]), site)
+    return {"id": created.id, "status": "created"}
 
 
 @app.put("/api/v1/sites/{site_id}")
@@ -979,7 +1004,7 @@ async def get_forecast(
     site_id: str,
     horizon: str = "24h",
     include_confidence: bool = True,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(current_user_dependency)
 ):
     """Get forecast for a specific site"""
     # Parse horizon - handle both hours (24h, 48h) and days (7d, 30d)
@@ -996,7 +1021,8 @@ async def get_forecast(
             raise HTTPException(status_code=400, detail=f"Invalid horizon format: {horizon}. Use '24h', '48h', '7d', or '30d'")
     
     # Check site access
-    async with db_pool.acquire() as conn:
+    conn = await db_pool.acquire()
+    try:
         site = await conn.fetchrow(
             "SELECT * FROM sites WHERE id = $1 AND tenant_id = $2",
             site_id,
@@ -1004,6 +1030,13 @@ async def get_forecast(
         )
         if not site:
             raise HTTPException(status_code=404, detail="Site not found")
+    finally:
+        release = getattr(db_pool, "release", None)
+        if release:
+            try:
+                await release(conn)
+            except Exception:
+                pass
     
     # Get forecast from cache or compute
     cache_key = f"forecast:{site_id}:{horizon}"
@@ -1018,7 +1051,10 @@ async def get_forecast(
     
     # Generate forecast using OpenWeather data
     try:
-        from services.forecasting.forecast_service import forecast_service
+        # Allow tests to monkeypatch the service instance via `api_gateway.main.forecast_service`.
+        forecast_svc = globals().get("forecast_service")
+        if forecast_svc is None:
+            from services.forecasting.forecast_service import forecast_service as forecast_svc
         
         # Convert site record to dict and parse JSON fields
         site_dict = dict(site)
@@ -1036,27 +1072,29 @@ async def get_forecast(
             except (json.JSONDecodeError, TypeError):
                 site_dict['turbine_params'] = None
         
-        # Call appropriate forecast method based on site type
-        site_type = site_dict.get('type', 'solar').lower()
-        if site_type == 'wind':
-            forecast = await forecast_service.generate_wind_forecast(
-                site=site_dict,
-                horizon_hours=horizon_hours
-            )
-        else:
-            # Default to solar for solar sites or unknown types
-            forecast = await forecast_service.generate_solar_forecast(
-                site=site_dict,
-                horizon_hours=horizon_hours
-            )
-        
+        forecast = await forecast_svc.generate_forecast_for_site(
+            site=site_dict,
+            horizon_hours=horizon_hours,
+        )
+
         # Add site metadata to forecast response
         forecast['site_name'] = site.get('name', 'Unknown Site')
         forecast['site_type'] = site.get('type', 'solar')
         forecast['capacity_kw'] = float(site.get('capacity_mw', 0)) * 1000
-        
+
+        # Persist successful forecasts only
+        if forecast.get('status') == 'ok' and forecast.get('values'):
+            try:
+                from core.repositories import persist_forecast_response
+                await persist_forecast_response(forecast)
+            except Exception as persist_err:
+                logger.warning(
+                    f"Failed to persist forecast (continuing): {persist_err}",
+                    site_id=site_id,
+                )
+
         # Cache for 5 minutes (optional - don't fail if Redis is unavailable)
-        if redis_client:
+        if redis_client and forecast.get('status') == 'ok':
             try:
                 import json
                 await redis_client.setex(cache_key, 300, json.dumps(forecast))
@@ -1066,28 +1104,19 @@ async def get_forecast(
         return forecast
     except Exception as e:
         logger.error("Error generating forecast", exc_info=e, site_id=site_id)
-        # Fallback to simple forecast
-        # Convert Decimal to float for calculations
-        capacity_mw = float(site['capacity_mw'])
-        forecast = {
+        return {
             "site_id": site_id,
             "site_name": site.get('name', 'Unknown Site'),
             "site_type": site.get('type', 'solar'),
-            "capacity_kw": capacity_mw * 1000,
+            "capacity_kw": float(site.get('capacity_mw', 0)) * 1000,
             "horizon": horizon,
             "forecast_generated": datetime.utcnow().isoformat(),
-            "values": [
-                {
-                    "timestamp": (datetime.utcnow() + timedelta(hours=i)).isoformat(),
-                    "predicted_power_kw": round(capacity_mw * 1000 * 0.5, 2),
-                    "p10": round(capacity_mw * 1000 * 0.4, 2),
-                    "p50": round(capacity_mw * 1000 * 0.5, 2),
-                    "p90": round(capacity_mw * 1000 * 0.6, 2)
-                }
-                for i in range(horizon_hours)
-            ]
+            "status": "unavailable",
+            "reason": "forecast_error",
+            "weather_source": None,
+            "model_version": None,
+            "values": [],
         }
-        return forecast
 
 
 @app.get("/api/v1/sites/{site_id}/weather/history")
@@ -1554,22 +1583,21 @@ async def get_site_performance(
 async def get_technology_recommendation(
     site_id: str,
     days: int = 365,
-    energy_price_per_mwh: float = 50.0,
-    solar_capex_per_mw: float = 1000000.0,
-    wind_capex_per_mw: float = 1500000.0,
-    current_user: dict = Depends(get_current_user)
+    energy_price_per_mwh: Optional[float] = None,
+    solar_capex_per_mw: Optional[float] = None,
+    wind_capex_per_mw: Optional[float] = None,
+    current_user: dict = Depends(current_user_dependency)
 ):
     """
-    Analyze historical weather data and provide technology recommendations
-    
-    Returns financial and technical analysis comparing solar, wind, and hybrid options
+    Analyse historical weather data and provide technology recommendations
+    using the nameplate yield model.
     """
     if not db_pool:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database not available"
         )
-    
+
     async with db_pool.acquire() as conn:
         site = await conn.fetchrow(
             "SELECT * FROM sites WHERE id = $1 AND tenant_id = $2",
@@ -1578,336 +1606,151 @@ async def get_technology_recommendation(
         )
         if not site:
             raise HTTPException(status_code=404, detail="Site not found")
-        
-        capacity_mw = float(site['capacity_mw'])
+
         latitude = float(site['latitude'])
         longitude = float(site['longitude'])
-        
-        # Get historical weather data (use max available, up to requested days)
+        weather_source = "database"
+        weather_data = []
+
         try:
-            from services.forecasting.weather.openweather import OpenWeatherClient
-            openweather_client = OpenWeatherClient(cache_manager=global_cache_manager, db_pool=db_pool)
-            
-            # Try to get data from database first
-            weather_data = None
-            try:
-                stations = await conn.fetch(
-                    "SELECT id FROM weather_stations WHERE site_id = $1",
-                    site_id
-                )
-                if stations and len(stations) > 0:
-                    station_ids = [str(s['id']) for s in stations]
-                    start_time = datetime.utcnow() - timedelta(days=min(days, 365))
-                    
-                    try:
-                        weather_data = await conn.fetch(
-                            """
-                            SELECT 
-                                time,
-                                ghi,
-                                wind_speed,
-                                wind_direction,
-                                ambient_temp
-                            FROM weather_readings
-                            WHERE station_id = ANY($1::uuid[])
-                            AND time >= $2
-                            ORDER BY time ASC
-                            """,
-                            station_ids,
-                            start_time
-                        )
-                    except asyncpg.exceptions.UndefinedTableError:
-                        weather_data = None
-            except Exception as e:
-                logger.warning(f"Error querying database for weather data: {e}")
-                weather_data = None
-            
-            # If no database data, try OpenWeather API (limited to available historical data)
-            if not weather_data or len(weather_data) == 0:
-                if openweather_client.api_key:
-                    # OpenWeather historical API is limited, so we'll use recent data
-                    # For better analysis, we'd ideally use a full year of data
-                    hours_requested = min(days * 24, 168)  # Max 1 week from API
-                    start_time = datetime.utcnow().replace(tzinfo=pytz.utc) - timedelta(hours=hours_requested)
-                    
-                    api_data = await openweather_client.get_historical_weather(
-                        latitude, longitude, start_time, hours=hours_requested, site_id=site_id
+            stations = await conn.fetch(
+                "SELECT id FROM weather_stations WHERE site_id = $1",
+                site_id
+            )
+            if stations:
+                station_ids = [str(s['id']) for s in stations]
+                start_time = datetime.utcnow() - timedelta(days=min(days, 365))
+                try:
+                    rows = await conn.fetch(
+                        """
+                        SELECT time, ghi, dni, dhi, wind_speed, wind_direction,
+                               ambient_temp, air_pressure
+                        FROM weather_readings
+                        WHERE station_id = ANY($1::uuid[])
+                        AND time >= $2
+                        ORDER BY time ASC
+                        """,
+                        station_ids,
+                        start_time
                     )
-                    
+                    weather_data = [dict(r) for r in rows]
+                except asyncpg.exceptions.UndefinedTableError:
+                    weather_data = []
+        except Exception as e:
+            logger.warning(f"Error querying database for weather data: {e}")
+            weather_data = []
+
+        if not weather_data:
+            try:
+                from services.forecasting.weather.openweather import OpenWeatherClient
+                openweather_client = OpenWeatherClient(
+                    cache_manager=global_cache_manager, db_pool=db_pool
+                )
+                if openweather_client.api_key:
+                    hours_requested = min(days * 24, 168)
+                    start_time = datetime.utcnow().replace(tzinfo=pytz.utc) - timedelta(
+                        hours=hours_requested
+                    )
+                    api_data = await openweather_client.get_historical_weather(
+                        latitude, longitude, start_time,
+                        hours=hours_requested, site_id=site_id
+                    )
                     if api_data:
+                        weather_source = "openweather_api"
                         weather_data = [
                             {
-                                'time': datetime.fromisoformat(d['timestamp'].replace('Z', '+00:00')),
+                                'time': datetime.fromisoformat(
+                                    d['timestamp'].replace('Z', '+00:00')
+                                ),
                                 'ghi': d.get('ghi'),
                                 'wind_speed': d.get('wind_speed'),
                                 'wind_direction': d.get('wind_direction'),
-                                'ambient_temp': d.get('temperature')
+                                'ambient_temp': d.get('temperature'),
                             }
                             for d in api_data
                         ]
-        except Exception as e:
-            logger.error(f"Error fetching weather data for analysis: {e}")
-            weather_data = []
-        
-        if not weather_data or len(weather_data) == 0:
-            return {
-                "site_id": site_id,
-                "error": "Insufficient weather data for analysis",
-                "message": "Need at least 30 days of historical weather data for accurate analysis",
-                "recommendations": {
-                    "recommended_technology": "unknown",
-                    "confidence": "low"
-                }
-            }
-        
-        # Analyze weather data
-        ghi_values = [float(w['ghi']) for w in weather_data if w.get('ghi') is not None]
-        wind_speeds = [float(w['wind_speed']) for w in weather_data if w.get('wind_speed') is not None]
-        
-        if len(ghi_values) == 0 and len(wind_speeds) == 0:
-            return {
-                "site_id": site_id,
-                "error": "No usable weather data",
-                "message": "Weather data missing GHI and wind speed values"
-            }
-        
-        # Calculate solar metrics
-        solar_analysis = {}
-        if len(ghi_values) > 0:
-            avg_ghi = sum(ghi_values) / len(ghi_values)
-            max_ghi = max(ghi_values)
-            min_ghi = min(ghi_values)
-            
-            # Estimate solar capacity factor
-            # Typical solar panel efficiency: ~20%, standard test conditions: 1000 W/m²
-            # Capacity factor = (actual output / max possible output)
-            # Simplified: CF ≈ (avg_ghi / 1000) * efficiency * availability
-            solar_efficiency = 0.20  # 20% panel efficiency
-            solar_availability = 0.95  # 95% availability (accounting for maintenance)
-            estimated_capacity_factor = (avg_ghi / 1000.0) * solar_efficiency * solar_availability * 100
-            
-            # Annual energy generation (kWh)
-            # Assuming the data period represents typical conditions
-            data_days = len(weather_data) / 24.0 if len(weather_data) > 0 else 1
-            daily_avg_ghi = avg_ghi
-            annual_ghi_kwh_per_m2 = (daily_avg_ghi * 365) / 1000.0  # Convert W/m² to kWh/m²
-            annual_energy_kwh = (annual_ghi_kwh_per_m2 * solar_efficiency * capacity_mw * 1000 * 1000) / 1000.0  # Convert to kWh
-            
-            solar_analysis = {
-                "avg_ghi_w_per_m2": round(avg_ghi, 2),
-                "max_ghi_w_per_m2": round(max_ghi, 2),
-                "min_ghi_w_per_m2": round(min_ghi, 2),
-                "estimated_capacity_factor_percent": round(estimated_capacity_factor, 2),
-                "annual_energy_gwh": round(annual_energy_kwh / 1000000.0, 2),
-                "solar_resource_class": (
-                    "Excellent" if avg_ghi > 200 else
-                    "Good" if avg_ghi > 150 else
-                    "Fair" if avg_ghi > 100 else
-                    "Poor"
-                )
-            }
-        
-        # Calculate wind metrics
-        wind_analysis = {}
-        if len(wind_speeds) > 0:
-            avg_wind_speed = sum(wind_speeds) / len(wind_speeds)
-            max_wind_speed = max(wind_speeds)
-            min_wind_speed = min(wind_speeds)
-            
-            # Estimate wind capacity factor using power curve approximation
-            # Typical wind turbine: cut-in ~3 m/s, rated ~12 m/s, cut-out ~25 m/s
-            # Simplified capacity factor estimation
-            def estimate_wind_cf(wind_speed):
-                if wind_speed < 3:
-                    return 0.0
-                elif wind_speed < 12:
-                    # Between cut-in and rated: cubic relationship
-                    return ((wind_speed / 12.0) ** 3) * 100
-                elif wind_speed < 25:
-                    return 100.0  # At rated power
-                else:
-                    return 0.0  # Cut-out
-            
-            hourly_cfs = [estimate_wind_cf(ws) for ws in wind_speeds]
-            estimated_capacity_factor = sum(hourly_cfs) / len(hourly_cfs) if hourly_cfs else 0
-            
-            # Annual energy generation
-            data_days = len(weather_data) / 24.0 if len(weather_data) > 0 else 1
-            annual_energy_kwh = (capacity_mw * 1000 * 24 * 365 * estimated_capacity_factor / 100.0)
-            
-            wind_analysis = {
-                "avg_wind_speed_m_per_s": round(avg_wind_speed, 2),
-                "max_wind_speed_m_per_s": round(max_wind_speed, 2),
-                "min_wind_speed_m_per_s": round(min_wind_speed, 2),
-                "estimated_capacity_factor_percent": round(estimated_capacity_factor, 2),
-                "annual_energy_gwh": round(annual_energy_kwh / 1000000.0, 2),
-                "wind_resource_class": (
-                    "Excellent" if avg_wind_speed > 7.5 else
-                    "Good" if avg_wind_speed > 6.5 else
-                    "Fair" if avg_wind_speed > 5.5 else
-                    "Poor"
-                )
-            }
-        
-        # Financial analysis
-        financial_analysis = {}
-        
-        # Solar financials
-        if solar_analysis:
-            solar_capex = capacity_mw * solar_capex_per_mw
-            solar_annual_revenue = (solar_analysis['annual_energy_gwh'] * 1000) * (energy_price_per_mwh / 1000.0)
-            solar_lcoe = (solar_capex * 0.08) / (solar_analysis['annual_energy_gwh'] * 1000) if solar_analysis['annual_energy_gwh'] > 0 else float('inf')
-            solar_payback_years = solar_capex / solar_annual_revenue if solar_annual_revenue > 0 else float('inf')
-            
-            financial_analysis['solar'] = {
-                "capex_usd": round(solar_capex, 2),
-                "annual_revenue_usd": round(solar_annual_revenue, 2),
-                "lcoe_usd_per_mwh": round(solar_lcoe, 2),
-                "payback_years": round(solar_payback_years, 1),
-                "npv_20yr_usd": round((solar_annual_revenue * 20) - solar_capex, 2)
-            }
-        
-        # Wind financials
-        if wind_analysis:
-            wind_capex = capacity_mw * wind_capex_per_mw
-            wind_annual_revenue = (wind_analysis['annual_energy_gwh'] * 1000) * (energy_price_per_mwh / 1000.0)
-            wind_lcoe = (wind_capex * 0.08) / (wind_analysis['annual_energy_gwh'] * 1000) if wind_analysis['annual_energy_gwh'] > 0 else float('inf')
-            wind_payback_years = wind_capex / wind_annual_revenue if wind_annual_revenue > 0 else float('inf')
-            
-            financial_analysis['wind'] = {
-                "capex_usd": round(wind_capex, 2),
-                "annual_revenue_usd": round(wind_annual_revenue, 2),
-                "lcoe_usd_per_mwh": round(wind_lcoe, 2),
-                "payback_years": round(wind_payback_years, 1),
-                "npv_20yr_usd": round((wind_annual_revenue * 20) - wind_capex, 2)
-            }
-        
-        # Hybrid analysis (50/50 split)
-        hybrid_analysis = {}
-        if solar_analysis and wind_analysis:
-            hybrid_capex = (capacity_mw * 0.5 * solar_capex_per_mw) + (capacity_mw * 0.5 * wind_capex_per_mw)
-            hybrid_annual_revenue = (
-                (solar_analysis['annual_energy_gwh'] * 0.5 * 1000) * (energy_price_per_mwh / 1000.0) +
-                (wind_analysis['annual_energy_gwh'] * 0.5 * 1000) * (energy_price_per_mwh / 1000.0)
-            )
-            hybrid_annual_energy = (solar_analysis['annual_energy_gwh'] * 0.5) + (wind_analysis['annual_energy_gwh'] * 0.5)
-            hybrid_lcoe = (hybrid_capex * 0.08) / (hybrid_annual_energy * 1000) if hybrid_annual_energy > 0 else float('inf')
-            hybrid_payback_years = hybrid_capex / hybrid_annual_revenue if hybrid_annual_revenue > 0 else float('inf')
-            
-            hybrid_analysis = {
-                "capex_usd": round(hybrid_capex, 2),
-                "annual_revenue_usd": round(hybrid_annual_revenue, 2),
-                "annual_energy_gwh": round(hybrid_annual_energy, 2),
-                "lcoe_usd_per_mwh": round(hybrid_lcoe, 2),
-                "payback_years": round(hybrid_payback_years, 1),
-                "npv_20yr_usd": round((hybrid_annual_revenue * 20) - hybrid_capex, 2)
-            }
-        
-        # Determine recommendation
-        recommendations = {
-            "recommended_technology": "unknown",
-            "confidence": "low",
-            "reasoning": []
-        }
-        
-        if solar_analysis and wind_analysis:
-            # Compare technologies
-            solar_score = 0
-            wind_score = 0
-            
-            # Capacity factor comparison
-            if solar_analysis['estimated_capacity_factor_percent'] > wind_analysis['estimated_capacity_factor_percent']:
-                solar_score += 2
-                recommendations['reasoning'].append("Solar has higher capacity factor")
-            else:
-                wind_score += 2
-                recommendations['reasoning'].append("Wind has higher capacity factor")
-            
-            # Financial comparison
-            if financial_analysis.get('solar', {}).get('lcoe_usd_per_mwh', float('inf')) < financial_analysis.get('wind', {}).get('lcoe_usd_per_mwh', float('inf')):
-                solar_score += 2
-                recommendations['reasoning'].append("Solar has lower LCOE")
-            else:
-                wind_score += 2
-                recommendations['reasoning'].append("Wind has lower LCOE")
-            
-            # Resource quality
-            if solar_analysis['solar_resource_class'] in ['Excellent', 'Good']:
-                solar_score += 1
-            if wind_analysis['wind_resource_class'] in ['Excellent', 'Good']:
-                wind_score += 1
-            
-            # Payback period
-            solar_payback = financial_analysis.get('solar', {}).get('payback_years', float('inf'))
-            wind_payback = financial_analysis.get('wind', {}).get('payback_years', float('inf'))
-            if solar_payback < wind_payback and solar_payback < 15:
-                solar_score += 1
-            elif wind_payback < solar_payback and wind_payback < 15:
-                wind_score += 1
-            
-            # Hybrid consideration
-            if hybrid_analysis and hybrid_analysis.get('lcoe_usd_per_mwh', float('inf')) < min(
-                financial_analysis.get('solar', {}).get('lcoe_usd_per_mwh', float('inf')),
-                financial_analysis.get('wind', {}).get('lcoe_usd_per_mwh', float('inf'))
-            ):
-                recommendations['recommended_technology'] = "hybrid"
-                recommendations['confidence'] = "high" if abs(solar_score - wind_score) <= 1 else "medium"
-                recommendations['reasoning'].append("Hybrid offers best financial performance")
-            elif solar_score > wind_score:
-                recommendations['recommended_technology'] = "solar"
-                recommendations['confidence'] = "high" if solar_score >= 4 else "medium"
-            else:
-                recommendations['recommended_technology'] = "wind"
-                recommendations['confidence'] = "high" if wind_score >= 4 else "medium"
-        
-        elif solar_analysis:
-            recommendations['recommended_technology'] = "solar"
-            recommendations['confidence'] = "medium"
-            recommendations['reasoning'].append("Only solar resource data available")
-        elif wind_analysis:
-            recommendations['recommended_technology'] = "wind"
-            recommendations['confidence'] = "medium"
-            recommendations['reasoning'].append("Only wind resource data available")
-        
-        return {
-            "site_id": site_id,
-            "analysis_period_days": days,
-            "data_points_analyzed": len(weather_data),
-            "solar_analysis": solar_analysis,
-            "wind_analysis": wind_analysis,
-            "hybrid_analysis": hybrid_analysis,
-            "financial_analysis": financial_analysis,
-            "recommendations": recommendations,
-            "assumptions": {
-                "energy_price_per_mwh": energy_price_per_mwh,
-                "solar_capex_per_mw": solar_capex_per_mw,
-                "wind_capex_per_mw": wind_capex_per_mw,
-                "solar_efficiency": 0.20,
-                "solar_availability": 0.95,
-                "discount_rate": 0.08
-            }
-        }
+            except Exception as e:
+                logger.error(f"Error fetching weather data for analysis: {e}")
+
+        from services.selection.recommend import recommend_for_site
+
+        site_dict = dict(site)
+        # asyncpg may return JSONB already decoded
+        return recommend_for_site(
+            site_dict,
+            weather_data,
+            energy_price_per_mwh=energy_price_per_mwh,
+            solar_capex_per_mw=solar_capex_per_mw,
+            wind_capex_per_mw=wind_capex_per_mw,
+            weather_source=weather_source,
+        )
 
 
 # WebSocket for real-time updates
 @app.websocket("/api/v1/ws/forecast")
 async def websocket_forecast(websocket: WebSocket):
-    """WebSocket for real-time forecast updates"""
+    """WebSocket for real-time forecast updates (JWT required via ?token=)."""
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    try:
+        payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+        user_id = payload.get("sub")
+        if user_id is None:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+    except JWTError:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    if not db_pool:
+        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+        return
+
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id, tenant_id FROM users WHERE id = $1 AND is_active = TRUE",
+            user_id,
+        )
+    if not user:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await websocket.accept()
-    
+    tenant_id = user["tenant_id"]
+
     try:
         while True:
             data = await websocket.receive_json()
-            site_id = data.get('site_id')
-            
-            # Subscribe to forecast updates
-            # In production, use Redis pub/sub or similar
+            site_id = data.get("site_id")
+            if not site_id:
+                await websocket.send_json({
+                    "type": "error",
+                    "detail": "site_id required",
+                })
+                continue
+
+            async with db_pool.acquire() as conn:
+                site = await conn.fetchrow(
+                    "SELECT id FROM sites WHERE id = $1 AND tenant_id = $2",
+                    site_id,
+                    tenant_id,
+                )
+            if not site:
+                await websocket.send_json({
+                    "type": "error",
+                    "detail": "site not found",
+                })
+                continue
+
             await websocket.send_json({
                 "type": "forecast_update",
                 "site_id": site_id,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.utcnow().isoformat(),
             })
-            
+
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
 
@@ -2323,18 +2166,10 @@ async def export_forecast(
             except (json.JSONDecodeError, TypeError):
                 site_dict['turbine_params'] = None
         
-        # Get appropriate forecast based on site type
-        site_type = site_dict.get('type', 'solar').lower()
-        if site_type == 'wind':
-            forecast = await forecast_service.generate_wind_forecast(
-                site=site_dict,
-                horizon_hours=horizon_hours
-            )
-        else:
-            forecast = await forecast_service.generate_solar_forecast(
-                site=site_dict,
-                horizon_hours=horizon_hours
-            )
+        forecast = await forecast_service.generate_forecast_for_site(
+            site=site_dict,
+            horizon_hours=horizon_hours,
+        )
         
         if format.lower() == "csv":
             # Generate CSV
@@ -2563,7 +2398,20 @@ async def get_forecast_accuracy(
         """
         
         accuracy_data = await conn.fetch(query, site_id, start_time)
-        
+
+        if not accuracy_data or len(accuracy_data) == 0:
+            # Derive accuracy from stored forecasts paired with production actuals
+            try:
+                from core.repositories import backfill_forecast_accuracy
+                inserted = await backfill_forecast_accuracy(site_id, start_time)
+                if inserted:
+                    accuracy_data = await conn.fetch(query, site_id, start_time)
+            except Exception as backfill_err:
+                logger.warning(
+                    f"Accuracy backfill failed: {backfill_err}",
+                    site_id=site_id,
+                )
+
         if not accuracy_data or len(accuracy_data) == 0:
             return {
                 "site_id": site_id,
@@ -2904,7 +2752,7 @@ async def get_weather_forecast(
 async def get_forecast_scheduling(
     site_id: str,
     horizon: str = "24h",
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(current_user_dependency)
 ):
     """
     Get production scheduling recommendations based on forecast
@@ -2963,20 +2811,13 @@ async def get_forecast_scheduling(
             except (json.JSONDecodeError, TypeError):
                 site_dict['turbine_params'] = None
         
-        site_type = site_dict.get('type', 'solar').lower()
-        if site_type == 'wind':
-            forecast = await forecast_service.generate_wind_forecast(
-                site=site_dict,
-                horizon_hours=horizon_hours
-            )
-        else:
-            forecast = await forecast_service.generate_solar_forecast(
-                site=site_dict,
-                horizon_hours=horizon_hours
-            )
-        
+        forecast = await forecast_service.generate_forecast_for_site(
+            site=site_dict,
+            horizon_hours=horizon_hours,
+        )
+
         # Analyze forecast for scheduling recommendations
-        if not forecast or 'values' not in forecast:
+        if not forecast or forecast.get('status') == 'unavailable' or 'values' not in forecast:
             logger.warning(f"Invalid forecast data for site {site_id} in scheduling endpoint")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -2997,90 +2838,25 @@ async def get_forecast_scheduling(
             timestamps = []
         
         capacity_kw = float(site.get('capacity_mw', 0)) * 1000
-        
-        if not powers:
-            return {
-                "site_id": site_id,
-                "horizon": horizon,
-                "recommendations": [],
-                "peak_periods": [],
-                "maintenance_windows": [],
-                "message": "Insufficient forecast data"
-            }
-        
-        # Find peak production periods (top 20% of forecast)
-        power_with_time = list(zip(powers, timestamps))
-        power_with_time.sort(key=lambda x: x[0], reverse=True)
-        peak_threshold = sorted(powers, reverse=True)[int(len(powers) * 0.2)] if len(powers) > 0 else 0
-        peak_periods = [
-            {"timestamp": ts, "power_kw": p, "capacity_factor": (p / capacity_kw * 100) if capacity_kw > 0 else 0}
-            for p, ts in power_with_time if p >= peak_threshold
-        ][:10]  # Top 10 peak periods
-        
-        # Find low production periods (bottom 20% - good for maintenance)
-        low_threshold = sorted(powers)[int(len(powers) * 0.2)] if len(powers) > 0 else 0
-        maintenance_windows = [
-            {"timestamp": ts, "power_kw": p, "capacity_factor": (p / capacity_kw * 100) if capacity_kw > 0 else 0}
-            for p, ts in power_with_time if p <= low_threshold
-        ][:10]  # Top 10 maintenance windows
-        
-        # Calculate average production
-        avg_power = sum(powers) / len(powers) if powers else 0
-        
-        # Generate recommendations
-        recommendations = []
-        
-        # Peak production recommendation
-        if peak_periods:
-            recommendations.append({
-                "type": "peak_production",
-                "priority": "high",
-                "title": "Peak Production Periods Identified",
-                "description": f"Top {len(peak_periods)} peak production periods identified. Consider maximizing dispatch during these times.",
-                "action": "Schedule maximum dispatch during peak periods",
-                "impact": "High revenue potential"
-            })
-        
-        # Maintenance recommendation
-        if maintenance_windows:
-            recommendations.append({
-                "type": "maintenance",
-                "priority": "medium",
-                "title": "Optimal Maintenance Windows",
-                "description": f"{len(maintenance_windows)} low-production periods identified. Ideal for scheduled maintenance.",
-                "action": "Schedule maintenance during low production periods",
-                "impact": "Minimal revenue loss"
-            })
-        
-        # Variability warning
-        if powers:
-            power_variance = sum((p - avg_power) ** 2 for p in powers) / len(powers)
-            power_std = power_variance ** 0.5
-            cv = (power_std / avg_power * 100) if avg_power > 0 else 0
-            
-            if cv > 30:
-                recommendations.append({
-                    "type": "variability",
-                    "priority": "medium",
-                    "title": "High Forecast Variability",
-                    "description": f"Forecast shows {cv:.1f}% coefficient of variation. Consider energy storage or flexible dispatch.",
-                    "action": "Implement flexible dispatch strategy",
-                    "impact": "Reduced revenue risk"
-                })
-        
+        from services.forecasting.planning_insights import build_scheduling_analysis
+
+        analysis = build_scheduling_analysis(
+            powers,
+            timestamps,
+            capacity_kw,
+            str(site.get("type") or "solar"),
+            horizon_hours,
+        )
         return {
             "site_id": site_id,
             "horizon": horizon,
             "capacity_kw": capacity_kw,
-            "average_power_kw": round(avg_power, 2),
-            "recommendations": recommendations,
-            "peak_periods": peak_periods[:5],  # Top 5
-            "maintenance_windows": maintenance_windows[:5],  # Top 5
-            "forecast_summary": {
-                "max_power_kw": round(max(powers), 2) if powers else 0,
-                "min_power_kw": round(min(powers), 2) if powers else 0,
-                "total_energy_kwh": round(sum(powers) * (horizon_hours / len(powers)), 2) if powers else 0,
-            }
+            "average_power_kw": analysis["average_power_kw"],
+            "recommendations": analysis["recommendations"],
+            "peak_periods": analysis["peak_periods"],
+            "maintenance_windows": analysis["maintenance_windows"],
+            "forecast_summary": analysis["forecast_summary"],
+            "message": analysis.get("message"),
         }
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -3174,12 +2950,52 @@ async def save_forecast_adjustments(
         }
 
 
+def _scenario_cache_key(site_id: str, scenario_name: str) -> str:
+    return f"forecast_scenario:{site_id}:{scenario_name}"
+
+
+async def _persist_scenario(site_id: str, scenario_name: str, payload: dict) -> None:
+    """Store scenario in Redis when available, else in-process store."""
+    import json
+
+    key = _scenario_cache_key(site_id, scenario_name)
+    _scenario_store[key] = payload
+    if redis_client:
+        try:
+            await redis_client.setex(
+                key, 86400, json.dumps(payload, default=str)
+            )
+        except Exception as e:
+            logger.warning(f"Failed to cache scenario in Redis: {e}")
+
+
+async def _load_scenarios_for_site(site_id: str) -> list:
+    import json
+
+    scenarios = []
+    prefix = f"forecast_scenario:{site_id}:"
+    if redis_client:
+        try:
+            keys = await redis_client.keys(f"{prefix}*")
+            for key in keys:
+                data = await redis_client.get(key)
+                if data:
+                    scenarios.append(json.loads(data))
+        except Exception as e:
+            logger.warning(f"Failed to list scenarios from Redis: {e}")
+    if not scenarios:
+        for key, payload in _scenario_store.items():
+            if key.startswith(prefix):
+                scenarios.append(payload)
+    return scenarios
+
+
 @app.get("/api/v1/sites/{site_id}/forecast/adjustments")
 @monitor_request("get_forecast_adjustments")
 async def get_forecast_adjustments(
     site_id: str,
     scenario_name: Optional[str] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(current_user_dependency)
 ):
     """Get saved forecast adjustments/scenarios"""
     if not db_pool:
@@ -3187,8 +3003,7 @@ async def get_forecast_adjustments(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database not available"
         )
-    
-    # Check site access
+
     async with db_pool.acquire() as conn:
         site = await conn.fetchrow(
             "SELECT * FROM sites WHERE id = $1 AND tenant_id = $2",
@@ -3197,31 +3012,23 @@ async def get_forecast_adjustments(
         )
         if not site:
             raise HTTPException(status_code=404, detail="Site not found")
-    
-    if not redis_client:
-        return {"adjustments": [], "scenarios": []}
-    
-    try:
-        import json
-        if scenario_name:
-            cache_key = f"forecast_adjustments:{site_id}:{scenario_name}"
-            cached = await redis_client.get(cache_key)
-            if cached:
-                return json.loads(cached)
-            return {"adjustments": [], "scenario_name": scenario_name}
-        else:
-            # Get all scenarios for this site
-            pattern = f"forecast_adjustments:{site_id}:*"
-            keys = await redis_client.keys(pattern)
-            scenarios = []
-            for key in keys:
-                data = await redis_client.get(key)
-                if data:
-                    scenarios.append(json.loads(data))
-            return {"scenarios": scenarios}
-    except Exception as e:
-        logger.warning(f"Failed to retrieve forecast adjustments: {e}")
-        return {"adjustments": [], "scenarios": []}
+
+    if scenario_name:
+        key = _scenario_cache_key(site_id, scenario_name)
+        if redis_client:
+            try:
+                import json
+                cached = await redis_client.get(key)
+                if cached:
+                    return json.loads(cached)
+            except Exception:
+                pass
+        if key in _scenario_store:
+            return _scenario_store[key]
+        return {"adjustments": [], "scenario_name": scenario_name, "scenarios": []}
+
+    scenarios = await _load_scenarios_for_site(site_id)
+    return {"adjustments": [], "scenarios": scenarios}
 
 
 @app.post("/api/v1/sites/{site_id}/forecast/scenarios")
@@ -3229,26 +3036,19 @@ async def get_forecast_adjustments(
 async def create_forecast_scenario(
     site_id: str,
     scenario: dict,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(current_user_dependency)
 ):
     """
-    Create a forecast scenario (optimistic/pessimistic/realistic)
-    
-    Request body:
-    {
-        "scenario_name": "optimistic" | "pessimistic" | "realistic",
-        "adjustment_percentage": 10.0,  // Percentage adjustment
-        "time_range": {"start": "2024-01-01T12:00:00Z", "end": "2024-01-01T18:00:00Z"},
-        "notes": "Optional notes"
-    }
+    Create a forecast scenario (optimistic/pessimistic/realistic).
+
+    Persists under forecast_scenario:{site_id}:{name} (Redis or in-process).
     """
     if not db_pool:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database not available"
         )
-    
-    # Check site access
+
     async with db_pool.acquire() as conn:
         site = await conn.fetchrow(
             "SELECT * FROM sites WHERE id = $1 AND tenant_id = $2",
@@ -3257,17 +3057,19 @@ async def create_forecast_scenario(
         )
         if not site:
             raise HTTPException(status_code=404, detail="Site not found")
-    
+
     scenario_name = scenario.get('scenario_name', 'custom')
-    adjustment_percentage = scenario.get('adjustment_percentage', 0.0)
+    try:
+        adjustment_percentage = float(scenario.get('adjustment_percentage', 0.0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="adjustment_percentage must be a number")
     time_range = scenario.get('time_range')
-    notes = scenario.get('notes', '')
-    
-    # Get base forecast
-    horizon_hours = 24  # Default, could be parameterized
+    notes = scenario.get('notes', '') or ''
+    horizon_hours = int(scenario.get('horizon_hours') or 24)
+
     try:
         from services.forecasting.forecast_service import forecast_service
-        
+
         site_dict = dict(site)
         if isinstance(site_dict.get('pv_params'), str):
             import json
@@ -3281,75 +3083,74 @@ async def create_forecast_scenario(
                 site_dict['turbine_params'] = json.loads(site_dict['turbine_params'])
             except (json.JSONDecodeError, TypeError):
                 site_dict['turbine_params'] = None
-        
-        site_type = site_dict.get('type', 'solar').lower()
-        if site_type == 'wind':
-            base_forecast = await forecast_service.generate_wind_forecast(
-                site=site_dict,
-                horizon_hours=horizon_hours
+
+        base_forecast = await forecast_service.generate_forecast_for_site(
+            site=site_dict,
+            horizon_hours=horizon_hours,
+        )
+
+        if not base_forecast or base_forecast.get('status') == 'unavailable' or 'values' not in base_forecast:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Base forecast unavailable; cannot create scenario",
             )
-        else:
-            base_forecast = await forecast_service.generate_solar_forecast(
-                site=site_dict,
-                horizon_hours=horizon_hours
+
+        forecast_values = base_forecast.get('values', [])
+        adjusted_values = []
+        for value in forecast_values:
+            if not isinstance(value, dict):
+                continue
+            timestamp = value.get('timestamp')
+            power = float(value.get('predicted_power_kw', value.get('p50_kw', 0)))
+            apply_adjustment = True
+            if time_range and timestamp:
+                ts = datetime.fromisoformat(str(timestamp).replace('Z', '+00:00'))
+                start = datetime.fromisoformat(time_range['start'].replace('Z', '+00:00'))
+                end = datetime.fromisoformat(time_range['end'].replace('Z', '+00:00'))
+                apply_adjustment = start <= ts <= end
+            adjusted_power = (
+                power * (1 + adjustment_percentage / 100) if apply_adjustment else power
             )
-        
-        # Apply scenario adjustment
-        if base_forecast and 'values' in base_forecast:
-            forecast_values = base_forecast.get('values', [])
-            adjusted_values = []
-            
-            for value in forecast_values:
-                if isinstance(value, dict):
-                    timestamp = value.get('timestamp')
-                    power = float(value.get('predicted_power_kw', value.get('p50_kw', 0)))
-                    
-                    # Check if within time range
-                    apply_adjustment = True
-                    if time_range:
-                        ts = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                        start = datetime.fromisoformat(time_range['start'].replace('Z', '+00:00'))
-                        end = datetime.fromisoformat(time_range['end'].replace('Z', '+00:00'))
-                        apply_adjustment = start <= ts <= end
-                    
-                    if apply_adjustment:
-                        adjusted_power = power * (1 + adjustment_percentage / 100)
-                    else:
-                        adjusted_power = power
-                    
-                    adjusted_value = value.copy()
-                    adjusted_value['predicted_power_kw'] = adjusted_power
-                    adjusted_value['p50_kw'] = adjusted_power
-                    adjusted_values.append(adjusted_value)
-            
-            scenario_forecast = base_forecast.copy()
-            scenario_forecast['values'] = adjusted_values
-            scenario_forecast['scenario_name'] = scenario_name
-            scenario_forecast['adjustment_percentage'] = adjustment_percentage
-            
-            # Cache scenario
-            cache_key = f"forecast_scenario:{site_id}:{scenario_name}"
-            if redis_client:
-                try:
-                    import json
-                    await redis_client.setex(cache_key, 86400, json.dumps(scenario_forecast))
-                except Exception as e:
-                    logger.warning(f"Failed to cache scenario: {e}")
-            
-            return {
-                "status": "created",
-                "site_id": site_id,
+            adjusted_value = dict(value)
+            adjusted_value['predicted_power_kw'] = round(adjusted_power, 3)
+            adjusted_value['p50_kw'] = round(adjusted_power, 3)
+            adjusted_values.append(adjusted_value)
+
+        created_at = datetime.utcnow().isoformat() + "Z"
+        scenario_record = {
+            "site_id": site_id,
+            "scenario_name": scenario_name,
+            "adjustment_percentage": adjustment_percentage,
+            "notes": notes,
+            "created_at": created_at,
+            "adjustments_count": len(adjusted_values),
+            "horizon_hours": horizon_hours,
+            "values": adjusted_values,
+            "weather_source": base_forecast.get("weather_source"),
+            "model_version": base_forecast.get("model_version"),
+        }
+        await _persist_scenario(site_id, scenario_name, scenario_record)
+
+        return {
+            "status": "created",
+            "site_id": site_id,
+            "scenario_name": scenario_name,
+            "adjustment_percentage": adjustment_percentage,
+            "created_at": created_at,
+            "adjustments_count": len(adjusted_values),
+            "forecast": {
+                "values": adjusted_values,
                 "scenario_name": scenario_name,
-                "forecast": scenario_forecast,
-                "adjustment_percentage": adjustment_percentage
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Invalid forecast data")
+                "adjustment_percentage": adjustment_percentage,
+            },
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error creating forecast scenario", exc_info=e, site_id=site_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error creating forecast scenario"
+            detail=f"Error creating forecast scenario: {str(e)}",
         )
 
 
@@ -3359,7 +3160,7 @@ async def create_forecast_scenario(
 async def get_forecast_insights(
     site_id: str,
     horizon: str = "24h",
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(current_user_dependency)
 ):
     """
     Get AI-powered insights for forecast:
@@ -3421,18 +3222,11 @@ async def get_forecast_insights(
             except (json.JSONDecodeError, TypeError):
                 site_dict['turbine_params'] = None
         
-        site_type = site_dict.get('type', 'solar').lower()
         try:
-            if site_type == 'wind':
-                forecast = await forecast_service.generate_wind_forecast(
-                    site=site_dict,
-                    horizon_hours=horizon_hours
-                )
-            else:
-                forecast = await forecast_service.generate_solar_forecast(
-                    site=site_dict,
-                    horizon_hours=horizon_hours
-                )
+            forecast = await forecast_service.generate_forecast_for_site(
+                site=site_dict,
+                horizon_hours=horizon_hours,
+            )
         except Exception as e:
             logger.error(f"Error generating forecast: {e}", exc_info=e, site_id=site_id)
             raise HTTPException(
@@ -3440,7 +3234,7 @@ async def get_forecast_insights(
                 detail=f"Error generating forecast: {str(e)}"
             )
         
-        if not forecast or 'values' not in forecast:
+        if not forecast or forecast.get('status') == 'unavailable' or 'values' not in forecast:
             logger.warning(f"Invalid forecast data for site {site_id}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -3460,135 +3254,36 @@ async def get_forecast_insights(
             timestamps = []
         
         capacity_kw = float(site.get('capacity_mw', 0)) * 1000
-        
-        insights = []
-        anomalies = []
-        recommendations = []
-        
-        if powers:
-            # 1. Anomaly Detection
-            # Detect sudden drops or spikes
-            for i in range(1, len(powers)):
-                prev_power = powers[i-1]
-                curr_power = powers[i]
-                change_pct = ((curr_power - prev_power) / prev_power * 100) if prev_power > 0 else 0
-                
-                # Flag significant changes (>30% change)
-                if abs(change_pct) > 30:
-                    anomalies.append({
-                        "type": "sudden_change",
-                        "severity": "high" if abs(change_pct) > 50 else "medium",
-                        "timestamp": timestamps[i] if i < len(timestamps) else None,
-                        "change_percentage": round(change_pct, 1),
-                        "previous_power_kw": round(prev_power, 1),
-                        "current_power_kw": round(curr_power, 1),
-                        "message": f"Sudden {'increase' if change_pct > 0 else 'decrease'} of {abs(change_pct):.1f}% detected"
-                    })
-            
-            # 2. Pattern Recognition
-            # Check for unusual patterns
-            avg_power = sum(powers) / len(powers)
-            max_power = max(powers)
-            min_power = min(powers)
-            power_range = max_power - min_power
-            cv = (power_range / avg_power * 100) if avg_power > 0 else 0
-            
-            if cv > 50:
-                insights.append({
-                    "type": "high_variability",
-                    "severity": "medium",
-                    "message": f"High forecast variability detected ({cv:.1f}% coefficient of variation)",
-                    "recommendation": "Consider energy storage or flexible dispatch to manage variability"
-                })
-            
-            # Check for low production periods
-            low_production_threshold = capacity_kw * 0.2
-            low_periods = [i for i, p in enumerate(powers) if p < low_production_threshold]
-            if len(low_periods) > len(powers) * 0.3:  # More than 30% of forecast
-                insights.append({
-                    "type": "extended_low_production",
-                    "severity": "medium",
-                    "message": f"Extended low production period detected ({len(low_periods)}/{len(powers)} hours below 20% capacity)",
-                    "recommendation": "Consider maintenance scheduling or alternative power sources"
-                })
-            
-            # 3. Recommendations
-            # Capacity utilization
-            avg_capacity_factor = (avg_power / capacity_kw * 100) if capacity_kw > 0 else 0
-            if avg_capacity_factor < 30:
-                recommendations.append({
-                    "type": "low_capacity_utilization",
-                    "priority": "medium",
-                    "title": "Low Capacity Utilization",
-                    "message": f"Average capacity factor is {avg_capacity_factor:.1f}%. Consider site optimization or equipment review.",
-                    "action": "Review site configuration and equipment performance"
-                })
-            
-            # Peak production opportunities
-            peak_threshold = capacity_kw * 0.8
-            peak_periods = [i for i, p in enumerate(powers) if p > peak_threshold]
-            if peak_periods:
-                recommendations.append({
-                    "type": "peak_production_opportunity",
-                    "priority": "high",
-                    "title": "Peak Production Opportunities",
-                    "message": f"{len(peak_periods)} peak production periods identified. Maximize dispatch during these times.",
-                    "action": "Schedule maximum dispatch during peak periods"
-                })
-            
-            # Forecast confidence
-            if forecast.get('confidenceIntervals'):
-                p10 = forecast['confidenceIntervals'].get('p10', [])
-                p90 = forecast['confidenceIntervals'].get('p90', [])
-                if p10 and p90 and len(p10) > 0:
-                    avg_confidence_range = sum([(p90[i] - p10[i]) / powers[i] * 100 for i in range(min(len(p10), len(powers))) if powers[i] > 0]) / len(p10) if p10 else 0
-                    if avg_confidence_range > 40:
-                        recommendations.append({
-                            "type": "high_uncertainty",
-                            "priority": "medium",
-                            "title": "High Forecast Uncertainty",
-                            "message": f"Average confidence range is {avg_confidence_range:.1f}%. Consider additional data sources or model refinement.",
-                            "action": "Review forecast model inputs and consider ensemble methods"
-                        })
-        
-        # 4. Historical Comparison Insights
-        # Get recent accuracy
+        mape = None
         async with db_pool.acquire() as conn:
-            recent_accuracy = await conn.fetchrow(
-                """
-                SELECT 
-                    AVG(absolute_error_kw) as mae,
-                    AVG(ABS(percentage_error)) as mape
-                FROM forecast_accuracy
-                WHERE site_id = $1
-                AND target_time >= NOW() - INTERVAL '7 days'
-                """,
-                site_id
-            )
-            
-            if recent_accuracy and recent_accuracy['mape']:
-                mape = float(recent_accuracy['mape'])
-                if mape > 20:
-                    recommendations.append({
-                        "type": "accuracy_degradation",
-                        "priority": "high",
-                        "title": "Forecast Accuracy Degradation",
-                        "message": f"Recent forecast accuracy has degraded (MAPE: {mape:.1f}%). Model may need retraining.",
-                        "action": "Review forecast model performance and consider model update"
-                    })
-        
+            try:
+                recent_accuracy = await conn.fetchrow(
+                    """
+                    SELECT AVG(ABS(percentage_error)) as mape
+                    FROM forecast_accuracy
+                    WHERE site_id = $1
+                    AND target_time >= NOW() - INTERVAL '7 days'
+                    """,
+                    site_id,
+                )
+                if recent_accuracy and recent_accuracy["mape"] is not None:
+                    mape = float(recent_accuracy["mape"])
+            except Exception:
+                mape = None
+
+        from services.forecasting.planning_insights import build_forecast_insights
+
+        built = build_forecast_insights(
+            powers,
+            timestamps,
+            capacity_kw,
+            str(site.get("type") or "solar"),
+            mape=mape,
+        )
         return {
             "site_id": site_id,
             "horizon": horizon,
-            "insights": insights,
-            "anomalies": anomalies,
-            "recommendations": recommendations,
-            "summary": {
-                "total_insights": len(insights),
-                "total_anomalies": len(anomalies),
-                "total_recommendations": len(recommendations),
-                "high_priority_count": len([r for r in recommendations if r.get('priority') == 'high'])
-            }
+            **built,
         }
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -3599,6 +3294,519 @@ async def get_forecast_insights(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error generating forecast insights: {str(e)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Admin dependency, load profiles, recommendation runs, vendors
+# ---------------------------------------------------------------------------
+
+async def require_admin(
+    current_user: dict = Depends(current_user_dependency),
+) -> dict:
+    role = (current_user.get("role") or "").lower()
+    if role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required",
+        )
+    return current_user
+
+
+@app.post("/api/v1/load-profiles")
+@monitor_request("create_load_profile")
+async def create_load_profile(
+    body: dict,
+    current_user: dict = Depends(current_user_dependency),
+):
+    from core.models import CreateLoadProfileRequest
+    from services.selection.runs import validate_load
+    import json as _json
+
+    try:
+        req = CreateLoadProfileRequest(**body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    err = validate_load(req.annual_kwh, req.peak_kw)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+    if req.hourly_kw is not None and len(req.hourly_kw) != 8760:
+        raise HTTPException(
+            status_code=422, detail="hourly_kw must contain exactly 8760 values"
+        )
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        if req.site_id:
+            site = await conn.fetchrow(
+                "SELECT id FROM sites WHERE id = $1 AND tenant_id = $2",
+                req.site_id,
+                current_user["tenant_id"],
+            )
+            if not site:
+                raise HTTPException(status_code=404, detail="Site not found")
+        row = await conn.fetchrow(
+            """
+            INSERT INTO load_profiles (
+                tenant_id, site_id, name, annual_kwh, peak_kw,
+                critical_fraction, backup_hours, grid_mode, hourly_kw
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+            RETURNING id, name, annual_kwh, peak_kw, grid_mode, created_at
+            """,
+            current_user["tenant_id"],
+            req.site_id,
+            req.name,
+            req.annual_kwh,
+            req.peak_kw,
+            req.critical_fraction,
+            req.backup_hours,
+            req.grid_mode.value,
+            _json.dumps(req.hourly_kw) if req.hourly_kw is not None else None,
+        )
+    return {
+        "id": str(row["id"]),
+        "name": row["name"],
+        "annual_kwh": float(row["annual_kwh"]),
+        "peak_kw": float(row["peak_kw"]),
+        "grid_mode": row["grid_mode"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+@app.post("/api/v1/recommendations")
+@monitor_request("create_recommendation")
+async def create_recommendation(
+    body: dict,
+    current_user: dict = Depends(current_user_dependency),
+):
+    from core.models import CreateRecommendationRequest
+    from services.selection.runs import build_run_result, validate_load
+    import json as _json
+
+    try:
+        req = CreateRecommendationRequest(**body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    annual_kwh = req.annual_kwh
+    peak_kw = req.peak_kw
+    critical_fraction = req.critical_fraction
+    backup_hours = req.backup_hours
+    grid_mode = req.grid_mode.value
+    hourly_kw = req.hourly_kw
+
+    async with db_pool.acquire() as conn:
+        if req.load_profile_id:
+            profile = await conn.fetchrow(
+                """
+                SELECT * FROM load_profiles
+                WHERE id = $1 AND tenant_id = $2
+                """,
+                req.load_profile_id,
+                current_user["tenant_id"],
+            )
+            if not profile:
+                raise HTTPException(status_code=404, detail="Load profile not found")
+            annual_kwh = float(profile["annual_kwh"])
+            peak_kw = float(profile["peak_kw"])
+            critical_fraction = float(profile["critical_fraction"])
+            backup_hours = float(profile["backup_hours"])
+            grid_mode = profile["grid_mode"]
+            if profile["hourly_kw"]:
+                hourly_kw = (
+                    profile["hourly_kw"]
+                    if isinstance(profile["hourly_kw"], list)
+                    else _json.loads(profile["hourly_kw"])
+                )
+
+        if req.site_id:
+            site = await conn.fetchrow(
+                "SELECT * FROM sites WHERE id = $1 AND tenant_id = $2",
+                req.site_id,
+                current_user["tenant_id"],
+            )
+            if not site:
+                raise HTTPException(status_code=404, detail="Site not found")
+
+        err = validate_load(annual_kwh or 0, peak_kw or 0)
+        if err:
+            raise HTTPException(status_code=422, detail=err)
+
+        weather_data = []
+        weather_source = "database"
+        if req.site_id:
+            try:
+                stations = await conn.fetch(
+                    "SELECT id FROM weather_stations WHERE site_id = $1",
+                    req.site_id,
+                )
+                if stations:
+                    start_time = datetime.utcnow() - timedelta(days=min(req.days, 365))
+                    rows = await conn.fetch(
+                        """
+                        SELECT time, ghi, dni, dhi, wind_speed, ambient_temp, air_pressure
+                        FROM weather_readings
+                        WHERE station_id = ANY($1::uuid[])
+                        AND time >= $2
+                        ORDER BY time ASC
+                        """,
+                        [str(s["id"]) for s in stations],
+                        start_time,
+                    )
+                    weather_data = [dict(r) for r in rows]
+            except Exception as e:
+                logger.warning(f"Weather fetch for recommendation: {e}")
+
+        if not weather_data:
+            # Synthetic mid-latitude daytime resource for prospecting without sensors
+            weather_source = "synthetic"
+            for h in range(24 * 30):
+                hour = h % 24
+                ghi = 500.0 if 8 <= hour < 17 else 0.0
+                weather_data.append(
+                    {
+                        "time": None,
+                        "ghi": ghi,
+                        "wind_speed": 6.5,
+                        "ambient_temp": 20.0,
+                    }
+                )
+
+        vendor_products = []
+        try:
+            products = await conn.fetch(
+                """
+                SELECT
+                    v.id AS vendor_id,
+                    vp.id AS product_id,
+                    v.legal_name,
+                    v.website_url,
+                    v.contact_url,
+                    v.countries,
+                    v.last_verified_on,
+                    v.active,
+                    vp.technology_class,
+                    vp.min_capacity_mw,
+                    vp.max_capacity_mw
+                FROM vendor_products vp
+                JOIN vendors v ON v.id = vp.vendor_id
+                WHERE v.active = TRUE
+                """
+            )
+            vendor_products = [dict(p) for p in products]
+        except Exception:
+            vendor_products = []
+
+        try:
+            result = build_run_result(
+                weather_rows=weather_data,
+                latitude=req.latitude,
+                longitude=req.longitude,
+                country_code=req.country_code.upper() if req.country_code else None,
+                annual_kwh=float(annual_kwh),
+                peak_kw=float(peak_kw),
+                critical_fraction=critical_fraction,
+                backup_hours=backup_hours,
+                grid_mode=grid_mode,
+                objective=req.objective.value,
+                roof_only=req.roof_only,
+                max_area_m2=req.max_area_m2,
+                budget_capex=req.budget_capex,
+                max_turbine_height_m=req.max_turbine_height_m,
+                energy_price_per_mwh=req.energy_price_per_mwh,
+                solar_capex_per_mw=req.solar_capex_per_mw,
+                wind_capex_per_mw=req.wind_capex_per_mw,
+                battery_capex_per_kwh=req.battery_capex_per_kwh,
+                weather_source=weather_source,
+                vendor_products=vendor_products,
+                hourly_kw=hourly_kw,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+        run_id = None
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO recommendation_runs (
+                    tenant_id, site_id, load_profile_id, objective,
+                    latitude, longitude, country_code, assumptions,
+                    data_quality, model_version, result, created_by
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12)
+                RETURNING id, created_at
+                """,
+                current_user["tenant_id"],
+                req.site_id,
+                req.load_profile_id,
+                req.objective.value,
+                req.latitude,
+                req.longitude,
+                req.country_code.upper() if req.country_code else None,
+                _json.dumps(result.get("assumptions") or {}),
+                result["data_quality"],
+                result["model_version"],
+                _json.dumps(result),
+                current_user["id"],
+            )
+            run_id = str(row["id"])
+            # Persist options when table exists
+            for opt in result.get("options") or []:
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO recommendation_options (
+                            run_id, technology_class, rank, eligible, exclusion_reason,
+                            capacity_mw, storage_kwh, solar_fraction, annual_mwh,
+                            renewable_fraction, lcoe_usd_per_mwh, payback_years,
+                            npv_usd, assumptions
+                        )
+                        VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb
+                        )
+                        ON CONFLICT (run_id, technology_class) DO NOTHING
+                        """,
+                        run_id,
+                        opt["technology_class"],
+                        opt["rank"],
+                        opt["eligible"],
+                        opt.get("exclusion_reason"),
+                        opt.get("capacity_mw"),
+                        opt.get("storage_kwh"),
+                        opt.get("solar_fraction"),
+                        opt.get("annual_mwh"),
+                        opt.get("renewable_fraction"),
+                        opt.get("lcoe_usd_per_mwh"),
+                        opt.get("payback_years"),
+                        opt.get("npv_usd"),
+                        _json.dumps(opt.get("assumptions") or {}),
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not persist option: {e}")
+        except Exception as e:
+            logger.warning(f"Could not persist recommendation run: {e}")
+            run_id = None
+
+    return {"id": run_id, **result}
+
+
+@app.get("/api/v1/recommendations/{run_id}")
+@monitor_request("get_recommendation")
+async def get_recommendation(
+    run_id: str,
+    current_user: dict = Depends(current_user_dependency),
+):
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM recommendation_runs
+            WHERE id = $1 AND tenant_id = $2
+            """,
+            run_id,
+            current_user["tenant_id"],
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Recommendation not found")
+        result = row["result"]
+        if isinstance(result, str):
+            import json as _json
+            result = _json.loads(result)
+        return {
+            "id": str(row["id"]),
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            **(result or {}),
+        }
+
+
+@app.get("/api/v1/sites/{site_id}/recommendations")
+@monitor_request("list_site_recommendations")
+async def list_site_recommendations(
+    site_id: str,
+    current_user: dict = Depends(current_user_dependency),
+):
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+    async with db_pool.acquire() as conn:
+        site = await conn.fetchrow(
+            "SELECT id FROM sites WHERE id = $1 AND tenant_id = $2",
+            site_id,
+            current_user["tenant_id"],
+        )
+        if not site:
+            raise HTTPException(status_code=404, detail="Site not found")
+        rows = await conn.fetch(
+            """
+            SELECT id, objective, data_quality, model_version, created_at
+            FROM recommendation_runs
+            WHERE site_id = $1 AND tenant_id = $2
+            ORDER BY created_at DESC
+            LIMIT 50
+            """,
+            site_id,
+            current_user["tenant_id"],
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "objective": r["objective"],
+            "data_quality": r["data_quality"],
+            "model_version": r["model_version"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+@app.post("/api/v1/admin/vendors")
+@monitor_request("create_vendor")
+async def create_vendor(
+    body: dict,
+    current_user: dict = Depends(require_admin),
+):
+    from core.models import CreateVendorRequest
+    from datetime import date as _date
+
+    try:
+        req = CreateVendorRequest(**body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    if req.min_capacity_mw > req.max_capacity_mw:
+        raise HTTPException(
+            status_code=422, detail="min_capacity_mw must be <= max_capacity_mw"
+        )
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    verified = _date.fromisoformat(req.last_verified_on)
+    countries = [c.upper()[:2] for c in req.countries]
+    async with db_pool.acquire() as conn:
+        vendor_id = await conn.fetchval(
+            """
+            INSERT INTO vendors (
+                legal_name, website_url, contact_url, countries, last_verified_on
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
+            """,
+            req.legal_name,
+            req.website_url,
+            req.contact_url,
+            countries,
+            verified,
+        )
+        product_id = await conn.fetchval(
+            """
+            INSERT INTO vendor_products (
+                vendor_id, technology_class, min_capacity_mw, max_capacity_mw, notes
+            )
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
+            """,
+            vendor_id,
+            req.technology_class,
+            req.min_capacity_mw,
+            req.max_capacity_mw,
+            req.notes,
+        )
+    return {
+        "vendor_id": str(vendor_id),
+        "product_id": str(product_id),
+        "status": "created",
+    }
+
+
+@app.get("/api/v1/admin/vendors")
+@monitor_request("list_vendors")
+async def list_vendors(
+    current_user: dict = Depends(require_admin),
+):
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+    async with db_pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT v.id AS vendor_id, v.legal_name, v.website_url, v.contact_url,
+                       v.countries, v.last_verified_on, v.active,
+                       vp.id AS product_id, vp.technology_class,
+                       vp.min_capacity_mw, vp.max_capacity_mw
+                FROM vendors v
+                LEFT JOIN vendor_products vp ON vp.vendor_id = v.id
+                ORDER BY v.legal_name
+                """
+            )
+        except Exception:
+            return []
+    return [
+        {
+            "vendor_id": str(r["vendor_id"]),
+            "legal_name": r["legal_name"],
+            "website_url": r["website_url"],
+            "contact_url": r["contact_url"],
+            "countries": list(r["countries"] or []),
+            "last_verified_on": str(r["last_verified_on"]),
+            "active": r["active"],
+            "product_id": str(r["product_id"]) if r["product_id"] else None,
+            "technology_class": r["technology_class"],
+            "min_capacity_mw": float(r["min_capacity_mw"])
+            if r["min_capacity_mw"] is not None
+            else None,
+            "max_capacity_mw": float(r["max_capacity_mw"])
+            if r["max_capacity_mw"] is not None
+            else None,
+        }
+        for r in rows
+    ]
+
+
+@app.post("/api/v1/recommendations/{run_id}/contact-draft")
+@monitor_request("contact_draft")
+async def recommendation_contact_draft(
+    run_id: str,
+    body: dict,
+    current_user: dict = Depends(current_user_dependency),
+):
+    from core.models import ContactDraftRequest
+    from services.selection.vendors import contact_draft
+
+    try:
+        req = ContactDraftRequest(**body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    if not db_pool:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT latitude, longitude, country_code FROM recommendation_runs
+            WHERE id = $1 AND tenant_id = $2
+            """,
+            run_id,
+            current_user["tenant_id"],
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Recommendation not found")
+
+    location = (
+        f"{row['country_code'] or 'unknown'} "
+        f"({row['latitude']}, {row['longitude']})"
+    )
+    return contact_draft(
+        legal_name=req.legal_name,
+        technology_class=req.technology_class,
+        capacity_mw=req.capacity_mw,
+        contact_url=req.contact_url,
+        site_or_location=location,
+    )
 
 
 if __name__ == "__main__":

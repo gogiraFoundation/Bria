@@ -1,6 +1,8 @@
 
 # **Bria - Technical Requirements Document (TRD)**
 
+> **Living docs:** For how the repository works **today**, start at [`docs/CODEBASE.md`](docs/CODEBASE.md) and [`docs/README.md`](docs/README.md). This TRD describes target architecture and requirements; several sections (for example synthetic fallbacks, forecasting microservice ownership, and ML ensemble detail) are aspirational relative to the current gateway-embedded physics + Open-Meteo path.
+
 ## **Version 2.0**  
 **Date:** 2025-12-08  
 **Status:** Final  

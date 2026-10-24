@@ -1,8 +1,10 @@
 # OpenWeather API Setup
 
+> **Behaviour note (current code):** Power forecasts prefer **Open-Meteo**, then OpenWeather solar radiation, then `status: unavailable`. They do **not** emit synthetic capacity curves. See [WEATHER_AND_FORECASTS.md](./WEATHER_AND_FORECASTS.md). This document remains useful for obtaining and configuring an OpenWeather API key.
+
 ## Overview
 
-Bria now uses OpenWeather API to fetch real weather data for generating accurate forecasts.
+Bria uses OpenWeather as a **failover** weather source (and for some history/current paths) when generating forecasts.
 
 ## Setup Instructions
 
@@ -28,19 +30,18 @@ After adding the API key, restart the API Gateway:
 ./run_api_gateway.sh
 ```
 
-## Features
+## Features (as used by Bria)
 
-- **Current Weather**: Fetches current weather conditions for any location
-- **Weather Forecast**: Gets 3-hourly forecasts up to 5 days ahead
-- **Solar Forecasting**: Uses weather data (cloud cover, temperature, etc.) to predict solar power generation
-- **Automatic Fallback**: If OpenWeather API is unavailable, the system uses a simplified forecast model
+- **Failover irradiance**: OpenWeather Solar Radiation is tried when Open-Meteo does not return usable GHI/DNI/DHI
+- **Current / forecast / history helpers**: OpenWeather-backed paths for some site weather UI endpoints
+- **No synthetic power series**: if irradiance cannot be obtained, forecasts return `status: unavailable` (see [WEATHER_AND_FORECASTS.md](./WEATHER_AND_FORECASTS.md))
 
-## API Usage
+## API usage
 
-The system automatically:
-- Fetches weather data when generating forecasts
-- Caches forecasts for 5 minutes to reduce API calls
-- Handles API errors gracefully with fallback forecasts
+The gateway:
+- Prefers Open-Meteo, then OpenWeather solar, when generating power forecasts
+- Caches successful forecasts for about five minutes (Redis)
+- Surfaces unavailable forecasts to the UI instead of inventing capacity curves
 
 ## Free Tier Limits
 
@@ -73,8 +74,9 @@ To test if OpenWeather is working:
 - You've exceeded the rate limit
 - Wait a few minutes or upgrade your plan
 
-### Forecasts still using fallback data
-- Check API Gateway logs for errors
-- Verify your API key is correct
-- Ensure the site has valid latitude/longitude coordinates
+### Forecast shows “unavailable”
+- Open-Meteo and OpenWeather may both have failed for that location
+- Check API Gateway logs for weather provider errors
+- Verify `OPENWEATHER_API_KEY` if you expect OpenWeather failover
+- Ensure the site has valid latitude/longitude
 

@@ -8,27 +8,26 @@ import {
   CircularProgress,
   Alert,
   Chip,
-  List,
-  ListItem,
-  ListItemIcon,
-  ListItemText,
+  Stack,
   Divider,
 } from '@mui/material';
 import {
   TrendingUp as TrendingUpIcon,
   Build as BuildIcon,
   Warning as WarningIcon,
-  Schedule as ScheduleIcon,
   CheckCircle as CheckCircleIcon,
 } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
+import KpiStrip from './ui/KpiStrip';
+import { formatPlanningTime } from '../utils/formatPlanningTime';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
 
 interface ProductionSchedulingPanelProps {
   siteId: string;
   horizon?: string;
+  compact?: boolean;
 }
 
 interface SchedulingData {
@@ -64,59 +63,42 @@ interface SchedulingData {
 const ProductionSchedulingPanel: React.FC<ProductionSchedulingPanelProps> = ({
   siteId,
   horizon = '24h',
+  compact = false,
 }) => {
   const { data: scheduling, isLoading, error } = useQuery<SchedulingData>({
     queryKey: ['forecast_scheduling', siteId, horizon],
     queryFn: async () => {
       const token = localStorage.getItem('access_token');
-      if (!token) {
-        throw new Error('Not authenticated');
-      }
+      if (!token) throw new Error('Not authenticated');
       const response = await axios.get(
         `${API_URL}/v1/sites/${siteId}/forecast/scheduling?horizon=${horizon}`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        }
+        { headers: { Authorization: `Bearer ${token}` } }
       );
       return response.data;
     },
     enabled: !!siteId,
   });
 
-  const getPriorityColor = (priority: string): string => {
-    switch (priority) {
-      case 'high':
-        return 'error';
-      case 'medium':
-        return 'warning';
-      case 'low':
-        return 'info';
-      default:
-        return 'default';
-    }
+  const priorityColor = (priority: string) => {
+    if (priority === 'high') return 'error';
+    if (priority === 'medium') return 'warning';
+    if (priority === 'low') return 'info';
+    return 'default';
   };
 
-  const getRecommendationIcon = (type: string) => {
-    switch (type) {
-      case 'peak_production':
-        return <TrendingUpIcon />;
-      case 'maintenance':
-        return <BuildIcon />;
-      case 'variability':
-        return <WarningIcon />;
-      default:
-        return <CheckCircleIcon />;
-    }
+  const recIcon = (type: string) => {
+    if (type === 'peak_production') return <TrendingUpIcon fontSize="small" color="success" />;
+    if (type === 'maintenance') return <BuildIcon fontSize="small" color="warning" />;
+    if (type === 'variability') return <WarningIcon fontSize="small" color="warning" />;
+    return <CheckCircleIcon fontSize="small" color="action" />;
   };
 
   if (isLoading) {
     return (
       <Card>
         <CardContent>
-          <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 300 }}>
-            <CircularProgress />
+          <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+            <CircularProgress size={28} />
           </Box>
         </CardContent>
       </Card>
@@ -128,184 +110,181 @@ const ProductionSchedulingPanel: React.FC<ProductionSchedulingPanelProps> = ({
       <Card>
         <CardContent>
           <Alert severity="error">
-            Error loading scheduling recommendations: {error instanceof Error ? error.message : 'Unknown error'}
+            Could not load scheduling:{' '}
+            {error instanceof Error ? error.message : 'Unknown error'}
           </Alert>
         </CardContent>
       </Card>
     );
   }
 
-  if (!scheduling) {
-    return null;
-  }
+  if (!scheduling) return null;
+
+  const summary = scheduling.forecast_summary;
+  const peakCf =
+    scheduling.peak_periods[0]?.capacity_factor ??
+    (scheduling.capacity_kw > 0
+      ? (summary.max_power_kw / scheduling.capacity_kw) * 100
+      : 0);
 
   return (
     <Card>
-      <CardContent>
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-          <Typography variant="h6">
-            Production Scheduling & Optimization
+      <CardContent sx={{ '&:last-child': { pb: compact ? 2 : 3 } }}>
+        <Stack
+          direction="row"
+          justifyContent="space-between"
+          alignItems="center"
+          sx={{ mb: compact ? 1.5 : 2 }}
+          flexWrap="wrap"
+          useFlexGap
+          spacing={1}
+        >
+          <Typography variant="subtitle1" fontWeight={600}>
+            Dispatch
           </Typography>
-          <Chip
-            label={`${horizon} Horizon`}
-            size="small"
-            color="primary"
-          />
-        </Box>
+          <Chip label={horizon} size="small" color="primary" variant="outlined" />
+        </Stack>
 
-        {/* Forecast Summary */}
-        <Box sx={{ mb: 3, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
-          <Typography variant="subtitle2" gutterBottom>
-            Forecast Summary
-          </Typography>
-          <Grid container spacing={2}>
-            <Grid item xs={6} sm={3}>
-              <Typography variant="body2" color="textSecondary">Average Power</Typography>
-              <Typography variant="h6">{scheduling.average_power_kw.toFixed(1)} kW</Typography>
-            </Grid>
-            <Grid item xs={6} sm={3}>
-              <Typography variant="body2" color="textSecondary">Max Power</Typography>
-              <Typography variant="h6">{scheduling.forecast_summary.max_power_kw.toFixed(1)} kW</Typography>
-            </Grid>
-            <Grid item xs={6} sm={3}>
-              <Typography variant="body2" color="textSecondary">Min Power</Typography>
-              <Typography variant="h6">{scheduling.forecast_summary.min_power_kw.toFixed(1)} kW</Typography>
-            </Grid>
-            <Grid item xs={6} sm={3}>
-              <Typography variant="body2" color="textSecondary">Total Energy</Typography>
-              <Typography variant="h6">{scheduling.forecast_summary.total_energy_kwh.toFixed(0)} kWh</Typography>
-            </Grid>
-          </Grid>
-        </Box>
+        <KpiStrip
+          dense={compact}
+          items={[
+            {
+              label: 'Average',
+              value: `${scheduling.average_power_kw.toFixed(0)} kW`,
+            },
+            {
+              label: 'Peak',
+              value: `${summary.max_power_kw.toFixed(0)} kW`,
+              hint: `${peakCf.toFixed(1)}% nameplate`,
+              tone: 'renewable',
+            },
+            {
+              label: 'Energy',
+              value: `${summary.total_energy_kwh.toFixed(0)} kWh`,
+            },
+            {
+              label: 'Floor',
+              value: `${summary.min_power_kw.toFixed(0)} kW`,
+              hint: 'Includes night idle',
+            },
+          ]}
+        />
 
         <Grid container spacing={2}>
-          {/* Recommendations */}
           <Grid item xs={12} md={6}>
-            <Typography variant="subtitle1" gutterBottom>
-              Recommendations
+            <Typography variant="overline" color="text.secondary" display="block" sx={{ mb: 1 }}>
+              Actions
             </Typography>
-            {scheduling.recommendations.length > 0 ? (
-              <List>
-                {scheduling.recommendations.map((rec, index) => (
-                  <React.Fragment key={index}>
-                    <ListItem>
-                      <ListItemIcon>
-                        {getRecommendationIcon(rec.type)}
-                      </ListItemIcon>
-                      <ListItemText
-                        primary={
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            {rec.title}
-                            <Chip
-                              label={rec.priority}
-                              size="small"
-                              color={getPriorityColor(rec.priority) as any}
-                            />
-                          </Box>
-                        }
-                        secondary={
-                          <Box>
-                            <Typography variant="body2" sx={{ mt: 0.5 }}>
-                              {rec.description}
-                            </Typography>
-                            <Typography variant="caption" color="textSecondary" sx={{ mt: 0.5, display: 'block' }}>
-                              <strong>Action:</strong> {rec.action}
-                            </Typography>
-                            <Typography variant="caption" color="textSecondary" sx={{ display: 'block' }}>
-                              <strong>Impact:</strong> {rec.impact}
-                            </Typography>
-                          </Box>
-                        }
-                      />
-                    </ListItem>
-                    {index < scheduling.recommendations.length - 1 && <Divider />}
-                  </React.Fragment>
-                ))}
-              </List>
+            {scheduling.recommendations.length === 0 ? (
+              <Alert severity="info">No dispatch actions for this horizon.</Alert>
             ) : (
-              <Alert severity="info">No specific recommendations at this time</Alert>
+              <Stack divider={<Divider flexItem />} spacing={0}>
+                {scheduling.recommendations.map((rec, index) => (
+                  <Stack
+                    key={`${rec.type}-${index}`}
+                    direction="row"
+                    spacing={1.5}
+                    alignItems="flex-start"
+                    sx={{ py: 1.25 }}
+                  >
+                    <Box sx={{ mt: 0.25 }}>{recIcon(rec.type)}</Box>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                        <Typography variant="body2" fontWeight={600}>
+                          {rec.title}
+                        </Typography>
+                        <Chip
+                          label={rec.priority}
+                          size="small"
+                          color={priorityColor(rec.priority) as any}
+                          sx={{ height: 22 }}
+                        />
+                      </Stack>
+                      <Typography variant="caption" color="text.secondary" display="block">
+                        {rec.action}
+                      </Typography>
+                      {!compact && (
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          {rec.description}
+                        </Typography>
+                      )}
+                    </Box>
+                  </Stack>
+                ))}
+              </Stack>
             )}
           </Grid>
 
-          {/* Peak Periods & Maintenance Windows */}
           <Grid item xs={12} md={6}>
-            <Grid container spacing={2}>
-              {/* Peak Production Periods */}
-              <Grid item xs={12}>
-                <Typography variant="subtitle1" gutterBottom>
-                  <ScheduleIcon sx={{ verticalAlign: 'middle', mr: 1 }} />
-                  Peak Production Periods
-                </Typography>
-                {scheduling.peak_periods.length > 0 ? (
-                  <Box sx={{ maxHeight: 200, overflowY: 'auto' }}>
-                    {scheduling.peak_periods.map((period, index) => (
-                      <Box
-                        key={index}
-                        sx={{
-                          p: 1,
-                          mb: 1,
-                          bgcolor: 'success.light',
-                          borderRadius: 1,
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                        }}
-                      >
-                        <Box>
-                          <Typography variant="body2">
-                            {new Date(period.timestamp).toLocaleString()}
-                          </Typography>
-                          <Typography variant="caption" color="textSecondary">
-                            {period.power_kw.toFixed(1)} kW ({period.capacity_factor.toFixed(1)}% capacity)
-                          </Typography>
-                        </Box>
-                        <TrendingUpIcon color="success" />
-                      </Box>
-                    ))}
-                  </Box>
-                ) : (
-                  <Alert severity="info" sx={{ mt: 1 }}>No peak periods identified</Alert>
-                )}
-              </Grid>
+            <Typography variant="overline" color="text.secondary" display="block" sx={{ mb: 1 }}>
+              Peak hours
+            </Typography>
+            {scheduling.peak_periods.length === 0 ? (
+              <Alert severity="info">No daytime peaks in this horizon.</Alert>
+            ) : (
+              <Stack spacing={0.75} sx={{ mb: 2 }}>
+                {scheduling.peak_periods.map((period, index) => (
+                  <Stack
+                    key={`peak-${index}`}
+                    direction="row"
+                    justifyContent="space-between"
+                    alignItems="center"
+                    sx={{
+                      px: 1.25,
+                      py: 0.75,
+                      bgcolor: 'rgba(13, 148, 136, 0.08)',
+                      borderRadius: 1,
+                      border: '1px solid',
+                      borderColor: 'divider',
+                    }}
+                  >
+                    <Typography variant="body2">{formatPlanningTime(period.timestamp)}</Typography>
+                    <Typography variant="body2" fontWeight={600} sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                      {period.power_kw.toFixed(0)} kW
+                      <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.75 }}>
+                        {period.capacity_factor.toFixed(1)}%
+                      </Typography>
+                    </Typography>
+                  </Stack>
+                ))}
+              </Stack>
+            )}
 
-              {/* Maintenance Windows */}
-              <Grid item xs={12}>
-                <Typography variant="subtitle1" gutterBottom>
-                  <BuildIcon sx={{ verticalAlign: 'middle', mr: 1 }} />
-                  Optimal Maintenance Windows
-                </Typography>
-                {scheduling.maintenance_windows.length > 0 ? (
-                  <Box sx={{ maxHeight: 200, overflowY: 'auto' }}>
-                    {scheduling.maintenance_windows.map((window, index) => (
-                      <Box
-                        key={index}
-                        sx={{
-                          p: 1,
-                          mb: 1,
-                          bgcolor: 'warning.light',
-                          borderRadius: 1,
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                        }}
-                      >
-                        <Box>
-                          <Typography variant="body2">
-                            {new Date(window.timestamp).toLocaleString()}
-                          </Typography>
-                          <Typography variant="caption" color="textSecondary">
-                            {window.power_kw.toFixed(1)} kW ({window.capacity_factor.toFixed(1)}% capacity)
-                          </Typography>
-                        </Box>
-                        <BuildIcon color="warning" />
-                      </Box>
-                    ))}
-                  </Box>
-                ) : (
-                  <Alert severity="info" sx={{ mt: 1 }}>No maintenance windows identified</Alert>
-                )}
-              </Grid>
-            </Grid>
+            <Typography variant="overline" color="text.secondary" display="block" sx={{ mb: 1 }}>
+              Daytime troughs
+            </Typography>
+            {scheduling.maintenance_windows.length === 0 ? (
+              <Typography variant="caption" color="text.secondary">
+                No soft daytime troughs (overnight zeros excluded).
+              </Typography>
+            ) : (
+              <Stack spacing={0.75}>
+                {scheduling.maintenance_windows.map((window, index) => (
+                  <Stack
+                    key={`trough-${index}`}
+                    direction="row"
+                    justifyContent="space-between"
+                    alignItems="center"
+                    sx={{
+                      px: 1.25,
+                      py: 0.75,
+                      bgcolor: 'rgba(217, 119, 6, 0.08)',
+                      borderRadius: 1,
+                      border: '1px solid',
+                      borderColor: 'divider',
+                    }}
+                  >
+                    <Typography variant="body2">{formatPlanningTime(window.timestamp)}</Typography>
+                    <Typography variant="body2" fontWeight={600} sx={{ fontVariantNumeric: 'tabular-nums' }}>
+                      {window.power_kw.toFixed(0)} kW
+                      <Typography component="span" variant="caption" color="text.secondary" sx={{ ml: 0.75 }}>
+                        {window.capacity_factor.toFixed(1)}%
+                      </Typography>
+                    </Typography>
+                  </Stack>
+                ))}
+              </Stack>
+            )}
           </Grid>
         </Grid>
       </CardContent>
@@ -314,4 +293,3 @@ const ProductionSchedulingPanel: React.FC<ProductionSchedulingPanelProps> = ({
 };
 
 export default ProductionSchedulingPanel;
-

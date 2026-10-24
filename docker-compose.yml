@@ -2,7 +2,8 @@ version: '3.8'
 
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg15
+    # HA image ships TimescaleDB and PostGIS binaries required by 001_initial_schema.sql
+    image: timescale/timescaledb-ha:pg15
     container_name: bria-postgres
     environment:
       POSTGRES_DB: bria
@@ -86,6 +87,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-bria_jwt_secret_key_change_in_production}
       JWT_ALGORITHM: HS256
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      ALLOW_PUBLIC_REGISTRATION: ${ALLOW_PUBLIC_REGISTRATION:-false}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "8000:8000"
@@ -108,6 +110,7 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:-bria_redis_password}@redis:6379/0
       MQTT_BROKER_HOST: ${MQTT_BROKER_HOST:-mosquitto}
       MQTT_BROKER_PORT: ${MQTT_BROKER_PORT:-1883}
+      INGESTION_API_KEY: ${INGESTION_API_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./backend/services/ingestion:/app

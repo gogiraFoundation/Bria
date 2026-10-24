@@ -15,6 +15,8 @@ import axios from 'axios';
 import { useAuth } from '../contexts/AuthContext';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+const ALLOW_REGISTRATION =
+  (process.env.REACT_APP_ALLOW_REGISTRATION || '').toLowerCase() === 'true';
 
 const Login: React.FC = () => {
   const [tab, setTab] = useState(0);
@@ -25,61 +27,65 @@ const Login: React.FC = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const navigate = useNavigate();
   const { login } = useAuth();
+
+  const formatError = (err: any, fallback: string) => {
+    if (err.response) {
+      const detail = err.response.data?.detail;
+      if (typeof detail === 'string') return detail;
+      if (Array.isArray(detail)) {
+        return detail
+          .map((e: any) => {
+            if (typeof e === 'string') return e;
+            if (e.msg) return e.msg;
+            if (e.message) return e.message;
+            return JSON.stringify(e);
+          })
+          .join(', ');
+      }
+      if (detail && typeof detail === 'object') {
+        return detail.message || detail.error || JSON.stringify(detail);
+      }
+      if (err.response.data?.message) return err.response.data.message;
+    }
+    if (err.request) {
+      return 'Cannot connect to server. Please check if the API Gateway is running.';
+    }
+    return err.message || fallback;
+  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setSuccess('');
+    setSubmitting(true);
 
     try {
       const formData = new FormData();
       formData.append('username', email);
       formData.append('password', password);
 
-      const response = await axios.post(
-        `${API_URL}/v1/auth/token`,
-        formData,
-        {
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-        }
-      );
+      const response = await axios.post(`${API_URL}/v1/auth/token`, formData, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+      });
 
       const token = response.data.access_token;
-      localStorage.setItem('access_token', token);
-      login(token); // Update AuthContext state
+      try {
+        await login(token);
+      } catch {
+        setError('Session could not be established. Please try again.');
+        return;
+      }
       navigate('/');
     } catch (err: any) {
       console.error('Login error:', err);
-      let errorMessage = 'Login failed';
-      
-      if (err.response) {
-        // Server responded with error
-        const detail = err.response.data?.detail;
-        if (typeof detail === 'string') {
-          errorMessage = detail;
-        } else if (Array.isArray(detail)) {
-          errorMessage = detail.map((e: any) => {
-            if (typeof e === 'string') return e;
-            if (e.msg) return e.msg;
-            if (e.message) return e.message;
-            return JSON.stringify(e);
-          }).join(', ');
-        } else if (detail && typeof detail === 'object') {
-          errorMessage = detail.message || detail.error || JSON.stringify(detail);
-        } else if (err.response.data?.message) {
-          errorMessage = err.response.data.message;
-        }
-      } else if (err.message) {
-        errorMessage = err.message;
-      } else if (err.request) {
-        errorMessage = 'Cannot connect to server. Please check if the API Gateway is running.';
-      }
-      
-      setError(errorMessage);
+      setError(formatError(err, 'Sign in failed'));
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -98,27 +104,21 @@ const Login: React.FC = () => {
       return;
     }
 
+    setSubmitting(true);
     try {
-      const response = await axios.post(
-        `${API_URL}/v1/auth/register`,
-        {
-          email,
-          password,
-          username: username || email.split('@')[0],
-          full_name: fullName || username || email.split('@')[0],
-        }
-      );
+      const response = await axios.post(`${API_URL}/v1/auth/register`, {
+        email,
+        password,
+        username: username || email.split('@')[0],
+        full_name: fullName || username || email.split('@')[0],
+      });
 
-      // If registration returns a token, log in automatically
       if (response.data.access_token) {
-        const token = response.data.access_token;
-        localStorage.setItem('access_token', token);
-        login(token); // Update AuthContext state
+        await login(response.data.access_token);
         navigate('/');
       } else {
-        setSuccess('Registration successful! Please login.');
+        setSuccess('Registration successful. Please sign in.');
         setTab(0);
-        setEmail(email);
         setPassword('');
         setUsername('');
         setFullName('');
@@ -126,50 +126,50 @@ const Login: React.FC = () => {
       }
     } catch (err: any) {
       console.error('Registration error:', err);
-      let errorMessage = 'Registration failed';
-      
-      if (err.response) {
-        // Server responded with error
-        const detail = err.response.data?.detail;
-        if (typeof detail === 'string') {
-          errorMessage = detail;
-        } else if (Array.isArray(detail)) {
-          errorMessage = detail.map((e: any) => {
-            if (typeof e === 'string') return e;
-            if (e.msg) return e.msg;
-            if (e.message) return e.message;
-            return JSON.stringify(e);
-          }).join(', ');
-        } else if (detail && typeof detail === 'object') {
-          errorMessage = detail.message || detail.error || JSON.stringify(detail);
-        } else if (err.response.data?.message) {
-          errorMessage = err.response.data.message;
-        }
-      } else if (err.message) {
-        errorMessage = err.message;
-      } else if (err.request) {
-        errorMessage = 'Cannot connect to server. Please check if the API Gateway is running.';
-      }
-      
-      setError(errorMessage);
+      setError(formatError(err, 'Registration failed'));
+    } finally {
+      setSubmitting(false);
     }
   };
 
   return (
-    <Container maxWidth="sm">
-      <Box sx={{ mt: 8 }}>
-        <Paper elevation={3} sx={{ p: 4 }}>
-          <Typography variant="h4" gutterBottom align="center">
-            Bria Platform
+    <Box
+      sx={{
+        minHeight: '100vh',
+        display: 'flex',
+        alignItems: 'center',
+        bgcolor: 'background.default',
+        py: 4,
+      }}
+    >
+      <Container maxWidth="sm">
+        <Paper variant="outlined" sx={{ p: { xs: 3, sm: 4 } }}>
+          <Typography
+            variant="h3"
+            component="h1"
+            align="center"
+            sx={{ fontWeight: 700, color: 'primary.main', letterSpacing: '-0.02em' }}
+          >
+            Bria
           </Typography>
-          <Typography variant="body2" color="textSecondary" align="center" sx={{ mb: 3 }}>
-            Renewable Energy Forecasting
+          <Typography variant="body1" color="text.secondary" align="center" sx={{ mt: 1, mb: 3 }}>
+            Renewable generation forecasts
           </Typography>
-          
-          <Tabs value={tab} onChange={(_, v) => { setTab(v); setError(''); setSuccess(''); }} sx={{ mb: 3 }}>
-            <Tab label="Login" />
-            <Tab label="Register" />
-          </Tabs>
+
+          {ALLOW_REGISTRATION ? (
+            <Tabs
+              value={tab}
+              onChange={(_, v) => {
+                setTab(v);
+                setError('');
+                setSuccess('');
+              }}
+              sx={{ mb: 3 }}
+            >
+              <Tab label="Sign in" />
+              <Tab label="Register" />
+            </Tabs>
+          ) : null}
 
           {error && (
             <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
@@ -192,6 +192,7 @@ const Login: React.FC = () => {
                 onChange={(e) => setEmail(e.target.value)}
                 margin="normal"
                 required
+                autoComplete="email"
               />
               <TextField
                 fullWidth
@@ -201,14 +202,16 @@ const Login: React.FC = () => {
                 onChange={(e) => setPassword(e.target.value)}
                 margin="normal"
                 required
+                autoComplete="current-password"
               />
               <Button
                 type="submit"
                 fullWidth
                 variant="contained"
-                sx={{ mt: 3, mb: 2 }}
+                disabled={submitting}
+                sx={{ mt: 3, mb: 1 }}
               >
-                Login
+                Sign in
               </Button>
             </form>
           ) : (
@@ -232,7 +235,7 @@ const Login: React.FC = () => {
               />
               <TextField
                 fullWidth
-                label="Full Name (optional)"
+                label="Full name (optional)"
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
                 margin="normal"
@@ -249,7 +252,7 @@ const Login: React.FC = () => {
               />
               <TextField
                 fullWidth
-                label="Confirm Password"
+                label="Confirm password"
                 type="password"
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
@@ -260,17 +263,17 @@ const Login: React.FC = () => {
                 type="submit"
                 fullWidth
                 variant="contained"
-                sx={{ mt: 3, mb: 2 }}
+                disabled={submitting}
+                sx={{ mt: 3, mb: 1 }}
               >
                 Register
               </Button>
             </form>
           )}
         </Paper>
-      </Box>
-    </Container>
+      </Container>
+    </Box>
   );
 };
 
 export default Login;
-

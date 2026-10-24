@@ -1,5 +1,5 @@
 import React, { useRef, useEffect } from 'react';
-import { Box, Paper, Typography, CircularProgress } from '@mui/material';
+import { Alert, Box, Paper, Typography, CircularProgress } from '@mui/material';
 import { useForecastData } from '../../hooks/useForecastData';
 import Plotly from 'plotly.js';
 
@@ -118,6 +118,23 @@ const ForecastChartSimple: React.FC<ForecastChartProps> = ({
       </Paper>
     );
   }
+
+  if (forecast.status === 'unavailable' || !forecast.values?.length) {
+    return (
+      <Paper variant="outlined" sx={{ p: 3 }}>
+        <Alert severity="warning" variant="outlined" sx={{ alignItems: 'flex-start' }}>
+          <Typography variant="subtitle1" component="div" sx={{ fontWeight: 600, mb: 0.5 }}>
+            Forecast unavailable
+          </Typography>
+          <Typography variant="body2" component="div">
+            {horizon}-hour power forecast could not be produced
+            {forecast.reason ? ` (${forecast.reason})` : ''}.
+            Weather sources did not return irradiance for this site.
+          </Typography>
+        </Alert>
+      </Paper>
+    );
+  }
   
   return (
     <Paper elevation={2} sx={{ p: 3 }}>
@@ -130,8 +147,14 @@ const ForecastChartSimple: React.FC<ForecastChartProps> = ({
       <Box sx={{ mt: 2 }}>
         <Typography variant="body2" color="textSecondary">
           {forecast.values?.length || 0} data points
-          {(forecast as any).forecast_generated && (
-            <> • Generated: {new Date((forecast as any).forecast_generated).toLocaleString()}</>
+          {forecast.weatherSource && (
+            <> • Weather: {forecast.weatherSource}</>
+          )}
+          {forecast.modelVersion && (
+            <> • Model: {forecast.modelVersion}</>
+          )}
+          {forecast.forecast_generated && (
+            <> • Generated: {new Date(forecast.forecast_generated).toLocaleString()}</>
           )}
         </Typography>
       </Box>

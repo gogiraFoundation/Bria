@@ -33,6 +33,12 @@ async def get_db_pool() -> asyncpg.Pool:
     return db_pool
 
 
+def set_db_pool(pool: Optional[asyncpg.Pool]) -> None:
+    """Inject an existing pool (used by the API gateway)."""
+    global db_pool
+    db_pool = pool
+
+
 async def close_db_pool():
     """Close database connection pool"""
     global db_pool

@@ -31,10 +31,14 @@ class StructuredLogger:
     
     def _log(self, level: int, message: str, **kwargs):
         """Internal logging method with extra context"""
+        # Avoid collisions with LogRecord built-in attributes (notably `name`).
+        # Passing conflicting keys via `extra=` raises `KeyError`.
+        reserved_keys = {"name", "message", "levelname", "asctime"}
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in reserved_keys}
         extra = {
             'timestamp': datetime.utcnow().isoformat(),
             'service': 'bria',
-            **kwargs
+            **filtered_kwargs
         }
         self.logger.log(level, message, extra=extra)
     
@@ -55,6 +59,11 @@ class StructuredLogger:
                 'error_message': str(exc_info),
             })
         extra.update(kwargs)
+        # Ensure we don't collide with LogRecord built-in attributes.
+        reserved_keys = {"name", "message", "levelname", "asctime"}
+        for k in list(extra.keys()):
+            if k in reserved_keys:
+                extra.pop(k, None)
         # Pass exc_info separately to avoid conflict with extra dict
         if isinstance(exc_info, Exception):
             self.logger.exception(message, extra=extra)

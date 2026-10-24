@@ -49,6 +49,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Nameplate yield model for technology recommendation (`services/selection`)
+- Recommendation runs API (`POST /api/v1/recommendations`), load profiles, Plan page
+- Technology shortlist with constraint screening and hybrid fraction search
+- Empty vendor catalogue with admin create form and contact-draft endpoint
+- Site location columns (`country_code`, `elevation_m`, `status`, `city`, `address_line`)
+
+### Changed
+- Technology recommendation uses corrected solar/wind energy and revenue maths
+- Confidence is capped by weather data quality (short OpenWeather samples stay low)
+- Hybrid site create now persists both `pv_params` and `turbine_params`
+- Operational solar forecasts use nameplate yield by default (`SOLAR_NAMEPLATE_YIELD=true`)
+  - New forecast rows report `model_version: nameplate-v1`
+  - Solar kilowatt forecasts will read higher than the previous double-efficiency path
+  - Set `SOLAR_NAMEPLATE_YIELD=false` to restore the legacy formula
+  - Historical forecast rows are not rewritten
+- Planning tab: daytime-aware scheduling and insights (no night-zero maintenance; no sunrise % spikes as anomalies)
+- Planning workspace: Dispatch / Forecast tools / Technology tabs; stat-led KPI strip; one chart mount (scenarios XOR compare)
+- Forecast scenarios persist under aligned Redis/in-process keys and surface create errors
+- Plan technology page uses a denser input grid
+
+### Fixed
+- Create scenario failing silently when Redis keys mismatched list vs write paths
+- Scheduling treated overnight zeros as maintenance windows and inflated CV with night-to-day range
+
 ### Planned
 - Enhanced authentication with refresh tokens
 - API rate limiting improvements

@@ -97,6 +97,11 @@ class CreateSiteRequest(BaseModel):
     timezone: str = "UTC"
     pv_params: Optional[Dict[str, Any]] = None
     turbine_params: Optional[Dict[str, Any]] = None
+    country_code: Optional[str] = Field(None, min_length=2, max_length=2)
+    elevation_m: Optional[float] = None
+    status: Optional[str] = None
+    city: Optional[str] = None
+    address_line: Optional[str] = None
 
 
 class Site(BaseModel):
@@ -111,6 +116,11 @@ class Site(BaseModel):
     tenant_id: str
     pv_params: Optional[Dict[str, Any]] = None
     turbine_params: Optional[Dict[str, Any]] = None
+    country_code: Optional[str] = None
+    elevation_m: Optional[float] = None
+    status: Optional[str] = None
+    city: Optional[str] = None
+    address_line: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -125,6 +135,11 @@ class UpdateSiteRequest(BaseModel):
     timezone: Optional[str] = None
     pv_params: Optional[Dict[str, Any]] = None
     turbine_params: Optional[Dict[str, Any]] = None
+    country_code: Optional[str] = Field(None, min_length=2, max_length=2)
+    elevation_m: Optional[float] = None
+    status: Optional[str] = None
+    city: Optional[str] = None
+    address_line: Optional[str] = None
 
 
 class AlertCondition(BaseModel):
@@ -246,4 +261,71 @@ class ForecastRecommendation(BaseModel):
     title: str
     message: str
     action: str
+
+
+class GridMode(str, Enum):
+    FIRM_GRID = "firm_grid"
+    WEAK_GRID = "weak_grid"
+    OFF_GRID = "off_grid"
+
+
+class RecommendationObjective(str, Enum):
+    MIN_COST_TO_SERVE = "min_cost_to_serve"
+    MAX_RENEWABLE_FRACTION = "max_renewable_fraction"
+    MIN_PAYBACK = "min_payback"
+
+
+class CreateLoadProfileRequest(BaseModel):
+    name: str
+    annual_kwh: float = Field(..., gt=0)
+    peak_kw: float = Field(..., gt=0)
+    critical_fraction: float = Field(0.0, ge=0, le=1)
+    backup_hours: float = Field(0.0, ge=0)
+    grid_mode: GridMode
+    site_id: Optional[str] = None
+    hourly_kw: Optional[List[float]] = None
+
+
+class CreateRecommendationRequest(BaseModel):
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    country_code: Optional[str] = Field(None, min_length=2, max_length=2)
+    site_id: Optional[str] = None
+    load_profile_id: Optional[str] = None
+    annual_kwh: Optional[float] = Field(None, gt=0)
+    peak_kw: Optional[float] = Field(None, gt=0)
+    critical_fraction: float = Field(0.0, ge=0, le=1)
+    backup_hours: float = Field(0.0, ge=0)
+    grid_mode: GridMode = GridMode.FIRM_GRID
+    objective: RecommendationObjective = RecommendationObjective.MIN_COST_TO_SERVE
+    roof_only: bool = False
+    max_area_m2: Optional[float] = Field(None, gt=0)
+    budget_capex: Optional[float] = Field(None, gt=0)
+    max_turbine_height_m: Optional[float] = Field(None, gt=0)
+    energy_price_per_mwh: float = 50.0
+    solar_capex_per_mw: Optional[float] = 1_000_000.0
+    wind_capex_per_mw: Optional[float] = 1_500_000.0
+    battery_capex_per_kwh: Optional[float] = None
+    hourly_kw: Optional[List[float]] = None
+    days: int = Field(365, ge=1, le=365)
+
+
+class CreateVendorRequest(BaseModel):
+    legal_name: str
+    website_url: str
+    contact_url: Optional[str] = None
+    countries: List[str]
+    last_verified_on: str  # ISO date
+    technology_class: str
+    min_capacity_mw: float = Field(..., ge=0)
+    max_capacity_mw: float = Field(..., ge=0)
+    notes: Optional[str] = None
+
+
+class ContactDraftRequest(BaseModel):
+    vendor_product_id: Optional[str] = None
+    legal_name: str
+    technology_class: str
+    capacity_mw: Optional[float] = None
+    contact_url: Optional[str] = None
 

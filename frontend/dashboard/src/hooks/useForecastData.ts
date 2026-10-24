@@ -6,8 +6,12 @@ interface ForecastData {
   siteName?: string;
   siteType?: string;
   capacity?: number;
+  status?: string;
+  weatherSource?: string | null;
+  modelVersion?: string | null;
+  reason?: string;
   timestamps: string[];
-  values: number[] | any[]; // Can be numbers or objects from raw API
+  values: number[] | any[];
   confidenceIntervals?: {
     p10: number[];
     p50: number[];
@@ -17,7 +21,7 @@ interface ForecastData {
     timestamps: string[];
     values: number[];
   };
-  forecast_generated?: string; // From raw API response
+  forecast_generated?: string;
 }
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
@@ -32,6 +36,10 @@ export const useForecastData = (siteId: string, horizon: number = 24, enabled: b
         site_name?: string;
         site_type?: string;
         capacity_kw?: number;
+        status?: string;
+        weather_source?: string | null;
+        model_version?: string | null;
+        reason?: string;
         values: Array<{
           timestamp: string;
           predicted_power_kw: number;
@@ -54,30 +62,54 @@ export const useForecastData = (siteId: string, horizon: number = 24, enabled: b
       );
       
       const forecast = response.data;
-      
-      // Extract site info from forecast
       const extractedSiteId = forecast.site_id || siteId;
       const siteName = forecast.site_name || undefined;
       const siteType = forecast.site_type || undefined;
       const capacity = forecast.capacity_kw || undefined;
-      
+      const status = forecast.status || (forecast.values?.length ? 'ok' : 'unavailable');
+      const values = Array.isArray(forecast.values) ? forecast.values : [];
+
+      if (status === 'unavailable' || values.length === 0) {
+        return {
+          siteId: extractedSiteId,
+          siteName,
+          siteType,
+          capacity,
+          status: 'unavailable',
+          weatherSource: forecast.weather_source ?? null,
+          modelVersion: forecast.model_version ?? null,
+          reason: forecast.reason,
+          timestamps: [],
+          values: [],
+          forecast_generated: forecast.forecast_generated || forecast.forecast_time,
+        };
+      }
+
       return {
         siteId: extractedSiteId,
         siteName,
         siteType,
         capacity,
-        timestamps: forecast.values.map((v) => v.timestamp),
-        values: forecast.values.map((v) => v.predicted_power_kw),
+        status: 'ok',
+        weatherSource: forecast.weather_source ?? null,
+        modelVersion: forecast.model_version ?? null,
+        timestamps: values.map((v) => v.timestamp),
+        values: values.map((v) => v.predicted_power_kw),
         confidenceIntervals: {
-          p10: forecast.values.map((v) => v.p10_kw || v.p10 || v.predicted_power_kw * 0.8),
-          p50: forecast.values.map((v) => v.p50_kw || v.p50 || v.predicted_power_kw),
-          p90: forecast.values.map((v) => v.p90_kw || v.p90 || v.predicted_power_kw * 1.2),
+          p10: values.map((v) =>
+            v.p10_kw != null ? v.p10_kw : v.p10 != null ? v.p10 : v.predicted_power_kw
+          ),
+          p50: values.map((v) =>
+            v.p50_kw != null ? v.p50_kw : v.p50 != null ? v.p50 : v.predicted_power_kw
+          ),
+          p90: values.map((v) =>
+            v.p90_kw != null ? v.p90_kw : v.p90 != null ? v.p90 : v.predicted_power_kw
+          ),
         },
         forecast_generated: forecast.forecast_generated || forecast.forecast_time,
       };
     },
     enabled: enabled && siteId !== 'placeholder',
-    refetchInterval: 300000, // Refetch every 5 minutes
+    refetchInterval: 300000,
   });
 };
-

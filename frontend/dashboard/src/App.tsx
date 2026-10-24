@@ -20,6 +20,7 @@ import SiteDetail from './pages/SiteDetail';
 import ForecastsOverview from './pages/ForecastsOverview';
 import AlertManagement from './pages/AlertManagement';
 import SystemAdmin from './pages/SystemAdmin';
+import PlanRecommendation from './pages/PlanRecommendation';
 import Login from './pages/Login';
 import ChangePassword from './pages/ChangePassword';
 
@@ -57,6 +58,7 @@ function App() {
                     <Route path="forecast" element={<ForecastsOverview />} />
                     <Route path="forecast/:siteId" element={<SiteDetail />} />
                     <Route path="alerts" element={<AlertManagement />} />
+                    <Route path="plan" element={<PlanRecommendation />} />
                     <Route path="admin" element={<SystemAdmin />} />
                   </Route>
                 </Routes>

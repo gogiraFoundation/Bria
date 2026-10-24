@@ -175,15 +175,16 @@ CREATE TABLE alerts (
 CREATE INDEX idx_alerts_site ON alerts(site_id, enabled);
 CREATE INDEX idx_alerts_severity ON alerts(severity);
 
--- Alert events
+-- Alert events (PK includes partition column required by TimescaleDB hypertables)
 CREATE TABLE alert_events (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
     alert_id UUID NOT NULL,
     triggered_at TIMESTAMPTZ NOT NULL,
     resolved_at TIMESTAMPTZ,
     severity ALERT_SEVERITY NOT NULL,
     data JSONB NOT NULL,
     notification_sent BOOLEAN DEFAULT FALSE,
+    PRIMARY KEY (id, triggered_at),
     CONSTRAINT fk_alert FOREIGN KEY (alert_id) REFERENCES alerts(id) ON DELETE CASCADE
 );
 
@@ -191,9 +192,9 @@ SELECT create_hypertable('alert_events', 'triggered_at', chunk_time_interval => 
 CREATE INDEX idx_alert_events_alert ON alert_events(alert_id, triggered_at DESC);
 CREATE INDEX idx_alert_events_resolved ON alert_events(resolved_at) WHERE resolved_at IS NULL;
 
--- Forecast accuracy metrics
+-- Forecast accuracy metrics (PK includes partition column required by TimescaleDB hypertables)
 CREATE TABLE forecast_accuracy (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
     site_id UUID NOT NULL,
     forecast_time TIMESTAMPTZ NOT NULL,
     target_time TIMESTAMPTZ NOT NULL,
@@ -204,6 +205,7 @@ CREATE TABLE forecast_accuracy (
     squared_error_kw DECIMAL(10,3),
     percentage_error DECIMAL(5,2),
     created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (id, target_time),
     CONSTRAINT fk_site FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE CASCADE
 );
 

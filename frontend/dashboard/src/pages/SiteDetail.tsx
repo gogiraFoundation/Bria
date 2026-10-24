@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  Container,
   Typography,
   Box,
   Card,
@@ -20,7 +19,6 @@ import {
   Tab,
   Fade,
 } from '@mui/material';
-import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import DeleteIcon from '@mui/icons-material/Delete';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
@@ -36,25 +34,18 @@ import CreateAlertForm from '../components/forms/CreateAlertForm';
 import ForecastSuggestions from '../components/ForecastSuggestions';
 import ForecastAccuracyMetrics from '../components/ForecastAccuracyMetrics';
 import CurrentWeatherDisplay from '../components/CurrentWeatherDisplay';
-import ForecastComparisonPanel from '../components/ForecastComparisonPanel';
 import ForecastAnalyticsDashboard from '../components/ForecastAnalyticsDashboard';
-import ProductionSchedulingPanel from '../components/ProductionSchedulingPanel';
-import InteractiveForecastAdjustments from '../components/InteractiveForecastAdjustments';
-import AIPoweredInsights from '../components/AIPoweredInsights';
-import TechnologyRecommendation from '../components/TechnologyRecommendation';
+import PlanningWorkspace from '../components/PlanningWorkspace';
 import { useSitePerformance } from '../hooks/useSitePerformance';
 import { notificationService } from '../services/notificationService';
+import PageHeader from '../components/ui/PageHeader';
+import KpiStrip from '../components/ui/KpiStrip';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import TrendingUpIcon from '@mui/icons-material/TrendingUp';
-import SpeedIcon from '@mui/icons-material/Speed';
-import BatteryChargingFullIcon from '@mui/icons-material/BatteryChargingFull';
-import AssessmentIcon from '@mui/icons-material/Assessment';
 import EditIcon from '@mui/icons-material/Edit';
 import RefreshIcon from '@mui/icons-material/Refresh';
 
-// Fix for default marker icon in Leaflet
 delete (L.Icon.Default.prototype as any)._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
@@ -63,6 +54,18 @@ L.Icon.Default.mergeOptions({
 });
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+
+const TAB_KEYS = ['overview', 'forecast', 'analytics', 'planning', 'alerts'] as const;
+
+function parseTabParam(raw: string | null): number {
+  if (raw == null || raw === '') return 0;
+  const asNum = Number(raw);
+  if (!Number.isNaN(asNum) && asNum >= 0 && asNum < TAB_KEYS.length) {
+    return asNum;
+  }
+  const idx = TAB_KEYS.indexOf(raw.toLowerCase() as (typeof TAB_KEYS)[number]);
+  return idx >= 0 ? idx : 0;
+}
 
 interface Site {
   id: string;
@@ -73,11 +76,24 @@ interface Site {
   capacity_mw: number;
   timezone: string;
   created_at?: string;
+  pv_params?: {
+    financial?: {
+      energy_price?: number;
+      capex?: number;
+    };
+  };
+  turbine_params?: {
+    financial?: {
+      energy_price?: number;
+      capex?: number;
+    };
+  };
 }
 
 const SiteDetail: React.FC = () => {
   const { siteId } = useParams<{ siteId: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [performanceDays, setPerformanceDays] = useState(30);
   const [forecastHorizon, setForecastHorizon] = useState<'24h' | '48h' | '7d' | '30d'>('24h');
@@ -86,7 +102,18 @@ const SiteDetail: React.FC = () => {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
-  const [currentTab, setCurrentTab] = useState(0);
+  const [currentTab, setCurrentTab] = useState(() => parseTabParam(searchParams.get('tab')));
+
+  useEffect(() => {
+    setCurrentTab(parseTabParam(searchParams.get('tab')));
+  }, [searchParams]);
+
+  const handleTabChange = (_: React.SyntheticEvent, newValue: number) => {
+    setCurrentTab(newValue);
+    const next = new URLSearchParams(searchParams);
+    next.set('tab', String(newValue));
+    setSearchParams(next, { replace: true });
+  };
 
   const { data: site, isLoading, error } = useQuery<Site>({
     queryKey: ['site', siteId],
@@ -110,24 +137,26 @@ const SiteDetail: React.FC = () => {
     performanceDays
   );
 
-  // Auto-refresh functionality
   useEffect(() => {
     if (!autoRefresh) return;
 
     const interval = setInterval(() => {
-      // Invalidate queries to trigger refetch
       queryClient.invalidateQueries({ queryKey: ['forecast', siteId] });
       queryClient.invalidateQueries({ queryKey: ['forecast_accuracy', siteId] });
       queryClient.invalidateQueries({ queryKey: ['current_weather', siteId] });
       queryClient.invalidateQueries({ queryKey: ['site', siteId] });
       setLastUpdate(new Date());
-    }, 300000); // Refresh every 5 minutes
+    }, 300000);
 
     return () => clearInterval(interval);
   }, [autoRefresh, siteId, queryClient]);
 
-  const handleDeleteClick = () => {
-    setDeleteDialogOpen(true);
+  const handleRefresh = () => {
+    queryClient.invalidateQueries({ queryKey: ['forecast', siteId] });
+    queryClient.invalidateQueries({ queryKey: ['forecast_accuracy', siteId] });
+    queryClient.invalidateQueries({ queryKey: ['current_weather', siteId] });
+    queryClient.invalidateQueries({ queryKey: ['site', siteId] });
+    setLastUpdate(new Date());
   };
 
   const handleDeleteConfirm = async () => {
@@ -145,14 +174,9 @@ const SiteDetail: React.FC = () => {
         },
       });
 
-      const siteName = site?.name || 'Site';
-      notificationService.success(`Site "${siteName}" deleted successfully`);
-      
-      // Invalidate queries
+      notificationService.success(`Site "${site?.name || 'Site'}" deleted successfully`);
       queryClient.invalidateQueries({ queryKey: ['sites'] });
       queryClient.invalidateQueries({ queryKey: ['forecast'] });
-      
-      // Navigate back to sites overview
       navigate('/');
     } catch (err: any) {
       console.error('Error deleting site:', err);
@@ -163,129 +187,127 @@ const SiteDetail: React.FC = () => {
     }
   };
 
-  const handleDeleteCancel = () => {
-    setDeleteDialogOpen(false);
-  };
+  const horizonHours =
+    forecastHorizon === '24h' ? 24 : forecastHorizon === '48h' ? 48 : forecastHorizon === '7d' ? 168 : 720;
 
   if (isLoading) {
     return (
-      <Container maxWidth="lg" sx={{ mt: 4, mb: 4, textAlign: 'center' }}>
+      <Box sx={{ textAlign: 'center', py: 8 }}>
         <CircularProgress />
-        <Typography sx={{ mt: 2 }}>Loading site details...</Typography>
-      </Container>
+        <Typography sx={{ mt: 2 }} color="text.secondary">
+          Loading site…
+        </Typography>
+      </Box>
     );
   }
 
   if (error) {
     return (
-      <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-        <Alert severity="error">
+      <Box>
+        <Alert severity="error" sx={{ mb: 2 }}>
           Error loading site: {error instanceof Error ? error.message : 'Unknown error'}
         </Alert>
-        <Button
-          startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/')}
-          sx={{ mt: 2 }}
-        >
-          Back to Sites
-        </Button>
-      </Container>
+        <Button onClick={() => navigate('/')}>Back to Sites</Button>
+      </Box>
     );
   }
 
   if (!site) {
     return (
-      <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-        <Alert severity="warning">Site not found</Alert>
-        <Button
-          startIcon={<ArrowBackIcon />}
-          onClick={() => navigate('/')}
-          sx={{ mt: 2 }}
-        >
-          Back to Sites
-        </Button>
-      </Container>
+      <Box>
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Site not found
+        </Alert>
+        <Button onClick={() => navigate('/')}>Back to Sites</Button>
+      </Box>
     );
   }
 
+  const overviewKpis = performance
+    ? [
+        {
+          label: 'Capacity factor',
+          value: `${performance.capacity_factor || 0}%`,
+          tone: 'renewable' as const,
+        },
+        {
+          label: 'Average power',
+          value: `${(performance.average_power_kw || 0).toLocaleString()} kW`,
+        },
+        {
+          label: 'Availability',
+          value: `${performance.average_availability || 0}%`,
+        },
+      ]
+    : [];
+
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-      <Button
-        startIcon={<ArrowBackIcon />}
-        onClick={() => navigate('/')}
-        sx={{ mb: 3 }}
-      >
-        Back to Sites
-      </Button>
+    <Box>
+      <PageHeader
+        title={site.name}
+        breadcrumbs={[
+          { label: 'Sites', href: '/' },
+          { label: site.name },
+        ]}
+        status={
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+            <SiteStatusIndicator siteId={site.id} size="medium" showDetails={false} />
+            <Chip
+              label={site.type.toUpperCase()}
+              size="small"
+              color={site.type === 'solar' ? 'primary' : site.type === 'wind' ? 'secondary' : 'default'}
+            />
+            <Chip label={`${site.capacity_mw} MW`} size="small" variant="outlined" />
+          </Box>
+        }
+        primaryAction={
+          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+            <Button
+              variant="outlined"
+              startIcon={<RefreshIcon />}
+              onClick={handleRefresh}
+            >
+              Refresh
+            </Button>
+            <ExportButton siteId={site.id} exportType="forecast" horizon={forecastHorizon} />
+          </Box>
+        }
+        secondaryActions={
+          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<EditIcon />}
+              onClick={() => setEditDialogOpen(true)}
+            >
+              Edit
+            </Button>
+            <Button
+              variant="outlined"
+              size="small"
+              color="error"
+              startIcon={<DeleteIcon />}
+              onClick={() => setDeleteDialogOpen(true)}
+            >
+              Delete
+            </Button>
+          </Box>
+        }
+      />
 
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Typography variant="h4">{site.name}</Typography>
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-          <SiteStatusIndicator siteId={site.id} size="medium" showDetails={false} />
-          <Button
-            variant="outlined"
-            startIcon={<EditIcon />}
-            onClick={() => setEditDialogOpen(true)}
-          >
-            Edit Site
-          </Button>
-          <Button
-            variant="outlined"
-            color="error"
-            startIcon={<DeleteIcon />}
-            onClick={handleDeleteClick}
-          >
-            Delete Site
-          </Button>
-        </Box>
-      </Box>
-
-      <Box sx={{ mb: 3 }}>
-        <Chip
-          label={site.type.toUpperCase()}
-          color={site.type === 'solar' ? 'primary' : site.type === 'wind' ? 'secondary' : 'default'}
-          sx={{ mr: 1 }}
-        />
-        <Chip label={`${site.capacity_mw} MW`} variant="outlined" />
-      </Box>
-
-      {/* Tabbed Interface */}
-      <Card 
-        elevation={2}
-        sx={{ 
-          mb: 3,
-          borderRadius: 2,
-          overflow: 'hidden',
-        }}
-      >
+      <Card sx={{ mb: 3 }}>
         <Tabs
           value={currentTab}
-          onChange={(_, newValue) => setCurrentTab(newValue)}
+          onChange={handleTabChange}
           variant="scrollable"
           scrollButtons="auto"
           sx={{
-            bgcolor: 'background.paper',
             borderBottom: 1,
             borderColor: 'divider',
-            '& .MuiTabs-indicator': {
-              height: 3,
-              borderRadius: '3px 3px 0 0',
-              transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-            },
             '& .MuiTab-root': {
               textTransform: 'none',
               fontWeight: 600,
-              fontSize: '0.95rem',
-              minHeight: 64,
-              px: 3,
-              transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-              '&:hover': {
-                backgroundColor: 'action.hover',
-                color: 'primary.main',
-              },
-            },
-            '& .Mui-selected': {
-              color: 'primary.main',
+              minHeight: 56,
             },
           }}
         >
@@ -297,141 +319,122 @@ const SiteDetail: React.FC = () => {
         </Tabs>
       </Card>
 
-      {/* Tab Panels */}
-      <Box 
-        sx={{ 
-          position: 'relative', 
-          minHeight: 400,
-          '& > *': {
-            animation: 'fadeIn 0.3s ease-in',
-          },
-          '@keyframes fadeIn': {
-            from: {
-              opacity: 0,
-              transform: 'translateY(10px)',
-            },
-            to: {
-              opacity: 1,
-              transform: 'translateY(0)',
-            },
-          },
-        }}
-      >
-        {/* Overview Tab */}
+      <Box sx={{ minHeight: 360 }}>
         {currentTab === 0 && (
-          <Fade in={currentTab === 0} timeout={300}>
-            <Grid container spacing={3}>
-              <Grid item xs={12} md={6}>
-                <Card>
-                  <CardContent>
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                      <Typography variant="h6">
-                        Site Information
-                      </Typography>
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        startIcon={<EditIcon />}
-                        onClick={() => setEditDialogOpen(true)}
-                      >
-                        Edit
-                      </Button>
-                    </Box>
-                    <Box sx={{ mt: 2 }}>
-                      <Typography variant="body2" color="textSecondary">
+          <Fade in timeout={250}>
+            <Box>
+              {performanceLoading ? (
+                <Box sx={{ mb: 2 }}>
+                  <CircularProgress size={24} />
+                </Box>
+              ) : (
+                overviewKpis.length > 0 && <KpiStrip items={overviewKpis} />
+              )}
+              <Grid container spacing={2}>
+                <Grid item xs={12} md={6}>
+                  <Card>
+                    <CardContent>
+                      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                        <Typography variant="h6">Site information</Typography>
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          startIcon={<EditIcon />}
+                          onClick={() => setEditDialogOpen(true)}
+                        >
+                          Edit
+                        </Button>
+                      </Box>
+                      <Typography variant="body2" color="text.secondary">
                         <strong>Type:</strong> {site.type}
                       </Typography>
-                      <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                         <strong>Capacity:</strong> {site.capacity_mw} MW
                       </Typography>
-                      <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                         <strong>Location:</strong> {site.latitude.toFixed(4)}, {site.longitude.toFixed(4)}
                       </Typography>
-                      <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                         <strong>Timezone:</strong> {site.timezone}
                       </Typography>
                       {site.created_at && (
-                        <Typography variant="body2" color="textSecondary" sx={{ mt: 1 }}>
+                        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                           <strong>Created:</strong>{' '}
                           {new Date(site.created_at).toLocaleDateString()}
                         </Typography>
                       )}
-                    </Box>
-                  </CardContent>
-                </Card>
-              </Grid>
-
-              <Grid item xs={12} md={6}>
-                <Card>
-                  <CardContent>
-                    <Typography variant="h6" gutterBottom>
-                      Location Map
-                    </Typography>
-                    <Box
-                      sx={{
-                        mt: 2,
-                        height: 300,
-                        borderRadius: 1,
-                        overflow: 'hidden',
-                        border: '1px solid',
-                        borderColor: 'divider',
-                      }}
-                    >
-                      <MapContainer
-                        center={[site.latitude, site.longitude]}
-                        zoom={13}
-                        style={{ height: '100%', width: '100%' }}
-                        scrollWheelZoom={false}
+                    </CardContent>
+                  </Card>
+                </Grid>
+                <Grid item xs={12} md={6}>
+                  <Card>
+                    <CardContent>
+                      <Typography variant="h6" gutterBottom>
+                        Location
+                      </Typography>
+                      <Box
+                        sx={{
+                          mt: 1,
+                          height: 280,
+                          borderRadius: 1,
+                          overflow: 'hidden',
+                          border: '1px solid',
+                          borderColor: 'divider',
+                        }}
                       >
-                        <TileLayer
-                          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                        />
-                        <Marker position={[site.latitude, site.longitude]}>
-                          <Popup>
-                            <strong>{site.name}</strong><br />
-                            {site.type} - {site.capacity_mw} MW<br />
-                            {site.latitude.toFixed(4)}, {site.longitude.toFixed(4)}
-                          </Popup>
-                        </Marker>
-                      </MapContainer>
-                    </Box>
-                  </CardContent>
-                </Card>
+                        <MapContainer
+                          center={[site.latitude, site.longitude]}
+                          zoom={13}
+                          style={{ height: '100%', width: '100%' }}
+                          scrollWheelZoom={false}
+                        >
+                          <TileLayer
+                            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                          />
+                          <Marker position={[site.latitude, site.longitude]}>
+                            <Popup>
+                              <strong>{site.name}</strong>
+                              <br />
+                              {site.type} · {site.capacity_mw} MW
+                            </Popup>
+                          </Marker>
+                        </MapContainer>
+                      </Box>
+                    </CardContent>
+                  </Card>
+                </Grid>
               </Grid>
-
-              {/* Current Weather Display */}
-              <Grid item xs={12}>
-                <CurrentWeatherDisplay siteId={site.id} />
-              </Grid>
-            </Grid>
+            </Box>
           </Fade>
         )}
 
-        {/* Forecast Tab */}
         {currentTab === 1 && (
-          <Fade in={currentTab === 1} timeout={300}>
-            <Grid container spacing={3}>
-              {/* Main Forecast Chart */}
+          <Fade in timeout={250}>
+            <Box>
+            <Grid container spacing={2}>
               <Grid item xs={12}>
-                <Card 
-                  elevation={3}
-                  sx={{
-                    borderRadius: 2,
-                    overflow: 'hidden',
-                    transition: 'transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out',
-                    '&:hover': {
-                      transform: 'translateY(-2px)',
-                      boxShadow: 6,
-                    },
-                  }}
-                >
+                <Card>
                   <CardContent>
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 2 }}>
-                      <Typography variant="h6" sx={{ fontWeight: 600 }}>
-                        {forecastHorizon === '24h' ? '24-Hour' : 
-                         forecastHorizon === '48h' ? '48-Hour' : 
-                         forecastHorizon === '7d' ? '7-Day' : '30-Day'} Power Forecast
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        mb: 2,
+                        flexWrap: 'wrap',
+                        gap: 2,
+                      }}
+                    >
+                      <Typography variant="h6">
+                        {forecastHorizon === '24h'
+                          ? '24-hour'
+                          : forecastHorizon === '48h'
+                            ? '48-hour'
+                            : forecastHorizon === '7d'
+                              ? '7-day'
+                              : '30-day'}{' '}
+                        power forecast
                       </Typography>
                       <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
                         <ForecastHorizonToggle
@@ -441,234 +444,129 @@ const SiteDetail: React.FC = () => {
                         <Button
                           size="small"
                           variant={autoRefresh ? 'contained' : 'outlined'}
-                          startIcon={<RefreshIcon />}
-                          onClick={() => {
-                            queryClient.invalidateQueries({ queryKey: ['forecast', site.id] });
-                            queryClient.invalidateQueries({ queryKey: ['forecast_accuracy', site.id] });
-                            queryClient.invalidateQueries({ queryKey: ['current_weather', site.id] });
-                            setLastUpdate(new Date());
-                          }}
-                        >
-                          Refresh
-                        </Button>
-                        <Button
-                          size="small"
-                          variant={autoRefresh ? 'contained' : 'outlined'}
                           onClick={() => setAutoRefresh(!autoRefresh)}
                         >
-                          {autoRefresh ? 'Auto: ON' : 'Auto: OFF'}
+                          {autoRefresh ? 'Auto: on' : 'Auto: off'}
                         </Button>
-                        <ExportButton
-                          siteId={site.id}
-                          exportType="forecast"
-                          horizon={forecastHorizon}
-                        />
                       </Box>
                     </Box>
-                    <Box sx={{ mt: 2 }}>
-                      <ForecastChart 
-                        siteId={site.id} 
-                        horizon={forecastHorizon === '24h' ? 24 : 
-                                 forecastHorizon === '48h' ? 48 : 
-                                 forecastHorizon === '7d' ? 168 : 720} 
-                        showConfidence={true} 
-                      />
-                    </Box>
+                    <ForecastChart siteId={site.id} horizon={horizonHours} showConfidence={true} />
                   </CardContent>
                 </Card>
               </Grid>
-
-              {/* Forecast Accuracy Metrics and Insights - Side by Side */}
-              <Grid item xs={12} md={6}>
-                <Fade in={currentTab === 1} timeout={500} style={{ transitionDelay: '100ms' }}>
-                  <Box
-                    sx={{
-                      animation: 'slideInLeft 0.5s ease-out',
-                      '@keyframes slideInLeft': {
-                        from: {
-                          opacity: 0,
-                          transform: 'translateX(-20px)',
-                        },
-                        to: {
-                          opacity: 1,
-                          transform: 'translateX(0)',
-                        },
-                      },
-                    }}
-                  >
-                    <ForecastAccuracyMetrics
-                      siteId={site.id}
-                      days={30}
-                      horizon={forecastHorizon}
-                    />
-                  </Box>
-                </Fade>
-              </Grid>
-
-              <Grid item xs={12} md={6}>
-                <Fade in={currentTab === 1} timeout={500} style={{ transitionDelay: '200ms' }}>
-                  <Box
-                    sx={{
-                      animation: 'slideInRight 0.5s ease-out',
-                      '@keyframes slideInRight': {
-                        from: {
-                          opacity: 0,
-                          transform: 'translateX(20px)',
-                        },
-                        to: {
-                          opacity: 1,
-                          transform: 'translateX(0)',
-                        },
-                      },
-                    }}
-                  >
-                    <ForecastSuggestions
-                      siteId={site.id}
-                      horizon={forecastHorizon === '24h' ? 24 : 
-                               forecastHorizon === '48h' ? 48 : 
-                               forecastHorizon === '7d' ? 168 : 720}
-                      siteType={site.type}
-                      capacityMw={site.capacity_mw}
-                    />
-                  </Box>
-                </Fade>
-              </Grid>
-
-              {/* Forecast Analytics Dashboard */}
               <Grid item xs={12}>
-                <Fade in={currentTab === 1} timeout={500} style={{ transitionDelay: '300ms' }}>
-                  <Box
-                    sx={{
-                      animation: 'fadeInUp 0.5s ease-out',
-                      '@keyframes fadeInUp': {
-                        from: {
-                          opacity: 0,
-                          transform: 'translateY(20px)',
-                        },
-                        to: {
-                          opacity: 1,
-                          transform: 'translateY(0)',
-                        },
-                      },
-                    }}
-                  >
-                    <ForecastAnalyticsDashboard siteId={site.id} />
-                  </Box>
-                </Fade>
+                <CurrentWeatherDisplay siteId={site.id} />
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <ForecastAccuracyMetrics siteId={site.id} days={30} horizon={forecastHorizon} />
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <ForecastSuggestions
+                  siteId={site.id}
+                  horizon={horizonHours}
+                  siteType={site.type}
+                  capacityMw={site.capacity_mw}
+                />
               </Grid>
             </Grid>
+            </Box>
           </Fade>
         )}
 
-        {/* Analytics Tab */}
         {currentTab === 2 && (
-          <Fade in={currentTab === 2} timeout={300}>
-            <Grid container spacing={3}>
-              {/* Performance Metrics */}
+          <Fade in timeout={250}>
+            <Box>
+            <Grid container spacing={2}>
               <Grid item xs={12}>
                 <Card>
-            <CardContent>
-              <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
-                <Typography variant="h6">
-                  Performance Metrics
-                </Typography>
-                <Box>
-                  {[7, 30, 90].map((d) => (
-                    <Button
-                      key={d}
-                      size="small"
-                      variant={performanceDays === d ? 'contained' : 'outlined'}
-                      onClick={() => setPerformanceDays(d)}
-                      sx={{ ml: 1 }}
-                    >
-                      {d}d
-                    </Button>
-                  ))}
-                </Box>
-              </Box>
-              {performanceLoading ? (
-                <Box sx={{ textAlign: 'center', py: 4 }}>
-                  <CircularProgress />
-                </Box>
-              ) : performance ? (
-                <Grid container spacing={2}>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Box sx={{ textAlign: 'center', p: 2, bgcolor: 'primary.light', borderRadius: 1 }}>
-                      <BatteryChargingFullIcon sx={{ fontSize: 40, color: 'primary.main', mb: 1 }} />
-                      <Typography variant="h4" color="primary.main">
-                        {performance.capacity_factor || 0}%
-                      </Typography>
-                      <Typography variant="body2" color="textSecondary">
-                        Capacity Factor
-                      </Typography>
+                  <CardContent>
+                    <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+                      <Typography variant="h6">Performance</Typography>
+                      <Box>
+                        {[7, 30, 90].map((d) => (
+                          <Button
+                            key={d}
+                            size="small"
+                            variant={performanceDays === d ? 'contained' : 'outlined'}
+                            onClick={() => setPerformanceDays(d)}
+                            sx={{ ml: 1 }}
+                          >
+                            {d}d
+                          </Button>
+                        ))}
+                      </Box>
                     </Box>
-                  </Grid>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Box sx={{ textAlign: 'center', p: 2, bgcolor: 'success.light', borderRadius: 1 }}>
-                      <TrendingUpIcon sx={{ fontSize: 40, color: 'success.main', mb: 1 }} />
-                      <Typography variant="h4" color="success.main">
-                        {(performance.average_power_kw || 0).toLocaleString()} kW
-                      </Typography>
-                      <Typography variant="body2" color="textSecondary">
-                        Average Power
-                      </Typography>
-                    </Box>
-                  </Grid>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Box sx={{ textAlign: 'center', p: 2, bgcolor: 'info.light', borderRadius: 1 }}>
-                      <SpeedIcon sx={{ fontSize: 40, color: 'info.main', mb: 1 }} />
-                      <Typography variant="h4" color="info.main">
-                        {(performance.total_energy_kwh || 0).toLocaleString()} kWh
-                      </Typography>
-                      <Typography variant="body2" color="textSecondary">
-                        Total Energy ({performanceDays}d)
-                      </Typography>
-                    </Box>
-                  </Grid>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <Box sx={{ textAlign: 'center', p: 2, bgcolor: 'warning.light', borderRadius: 1 }}>
-                      <AssessmentIcon sx={{ fontSize: 40, color: 'warning.main', mb: 1 }} />
-                      <Typography variant="h4" color="warning.main">
-                        {performance.average_availability || 0}%
-                      </Typography>
-                      <Typography variant="body2" color="textSecondary">
-                        Availability
-                      </Typography>
-                    </Box>
-                  </Grid>
-                  <Grid item xs={12}>
-                    <Box sx={{ mt: 2, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
-                      <Grid container spacing={2}>
+                    {performanceLoading ? (
+                      <Box sx={{ textAlign: 'center', py: 4 }}>
+                        <CircularProgress />
+                      </Box>
+                    ) : performance ? (
+                      <KpiStrip
+                        items={[
+                          {
+                            label: 'Capacity factor',
+                            value: `${performance.capacity_factor || 0}%`,
+                            tone: 'renewable',
+                          },
+                          {
+                            label: 'Average power',
+                            value: `${(performance.average_power_kw || 0).toLocaleString()} kW`,
+                          },
+                          {
+                            label: `Total energy (${performanceDays}d)`,
+                            value: `${(performance.total_energy_kwh || 0).toLocaleString()} kWh`,
+                          },
+                          {
+                            label: 'Availability',
+                            value: `${performance.average_availability || 0}%`,
+                          },
+                        ]}
+                      />
+                    ) : (
+                      <Typography color="text.secondary">No performance data available</Typography>
+                    )}
+                    {performance && (
+                      <Grid container spacing={2} sx={{ mt: 0 }}>
                         <Grid item xs={6} sm={3}>
-                          <Typography variant="body2" color="textSecondary">Max Power</Typography>
-                          <Typography variant="h6">{(performance.max_power_kw || 0).toLocaleString()} kW</Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Max power
+                          </Typography>
+                          <Typography variant="h6">
+                            {(performance.max_power_kw || 0).toLocaleString()} kW
+                          </Typography>
                         </Grid>
                         <Grid item xs={6} sm={3}>
-                          <Typography variant="body2" color="textSecondary">Min Power</Typography>
-                          <Typography variant="h6">{(performance.min_power_kw || 0).toLocaleString()} kW</Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Min power
+                          </Typography>
+                          <Typography variant="h6">
+                            {(performance.min_power_kw || 0).toLocaleString()} kW
+                          </Typography>
                         </Grid>
                         <Grid item xs={6} sm={3}>
-                          <Typography variant="body2" color="textSecondary">Efficiency</Typography>
-                          <Typography variant="h6">{performance.average_efficiency || 0}%</Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Efficiency
+                          </Typography>
+                          <Typography variant="h6">
+                            {performance.average_efficiency || 0}%
+                          </Typography>
                         </Grid>
                         <Grid item xs={6} sm={3}>
-                          <Typography variant="body2" color="textSecondary">Data Points</Typography>
-                          <Typography variant="h6">{(performance.data_points || 0).toLocaleString()}</Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Data points
+                          </Typography>
+                          <Typography variant="h6">
+                            {(performance.data_points || 0).toLocaleString()}
+                          </Typography>
                         </Grid>
                       </Grid>
-                    </Box>
-                  </Grid>
-                </Grid>
-              ) : (
-                <Typography color="textSecondary">
-                  No performance data available
-                </Typography>
-              )}
-            </CardContent>
-          </Card>
-        </Grid>
-
-              {/* Historical Weather Chart */}
+                    )}
+                  </CardContent>
+                </Card>
+              </Grid>
+              <Grid item xs={12}>
+                <ForecastAnalyticsDashboard siteId={site.id} />
+              </Grid>
               <Grid item xs={12}>
                 <Card>
                   <CardContent>
@@ -676,8 +574,6 @@ const SiteDetail: React.FC = () => {
                   </CardContent>
                 </Card>
               </Grid>
-
-              {/* Production History Chart */}
               <Grid item xs={12}>
                 <Card>
                   <CardContent>
@@ -685,152 +581,129 @@ const SiteDetail: React.FC = () => {
                   </CardContent>
                 </Card>
               </Grid>
-
-              {/* AI-Powered Insights */}
-              <Grid item xs={12}>
-                <AIPoweredInsights siteId={site.id} horizon={forecastHorizon} />
-              </Grid>
             </Grid>
+            </Box>
           </Fade>
         )}
 
-        {/* Planning Tab */}
         {currentTab === 3 && (
-          <Fade in={currentTab === 3} timeout={300}>
-            <Grid container spacing={3}>
-              {/* Technology Recommendation Analysis */}
-              <Grid item xs={12}>
-                <TechnologyRecommendation siteId={site.id} days={365} />
-              </Grid>
-
-              {/* Production Scheduling Panel */}
-              <Grid item xs={12}>
-                <ProductionSchedulingPanel
-                  siteId={site.id}
-                  horizon={forecastHorizon}
-                />
-              </Grid>
-
-              {/* Interactive Forecast Adjustments */}
-              <Grid item xs={12}>
-                <InteractiveForecastAdjustments
-                  siteId={site.id}
-                  horizon={forecastHorizon === '24h' ? 24 : 
-                           forecastHorizon === '48h' ? 48 : 
-                           forecastHorizon === '7d' ? 168 : 720}
-                />
-              </Grid>
-
-              {/* Forecast Comparison Panel */}
-              <Grid item xs={12}>
-                <ForecastComparisonPanel
-                  siteId={site.id}
-                  horizon={forecastHorizon === '24h' ? 24 : 
-                           forecastHorizon === '48h' ? 48 : 
-                           forecastHorizon === '7d' ? 168 : 720}
-                />
-              </Grid>
-            </Grid>
+          <Fade in timeout={250}>
+            <Box>
+              <PlanningWorkspace
+                siteId={site.id}
+                forecastHorizon={forecastHorizon}
+                horizonHours={horizonHours}
+                energyPricePerMwh={
+                  site.pv_params?.financial?.energy_price ??
+                  site.turbine_params?.financial?.energy_price ??
+                  50
+                }
+                solarCapexPerMw={
+                  site.pv_params?.financial?.capex && site.capacity_mw
+                    ? site.pv_params.financial.capex / site.capacity_mw
+                    : 1000000
+                }
+                windCapexPerMw={
+                  site.turbine_params?.financial?.capex && site.capacity_mw
+                    ? site.turbine_params.financial.capex / site.capacity_mw
+                    : 1500000
+                }
+              />
+            </Box>
           </Fade>
         )}
 
-        {/* Alerts Tab */}
         {currentTab === 4 && (
-          <Fade in={currentTab === 4} timeout={300}>
-            <Grid container spacing={3}>
+          <Fade in timeout={250}>
+            <Box>
+            <Grid container spacing={2}>
               <Grid item xs={12}>
                 <Card>
                   <CardContent>
-                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                      <Typography variant="h6">
-                        Active Alerts
-                      </Typography>
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        mb: 2,
+                      }}
+                    >
+                      <Typography variant="h6">Active alerts</Typography>
                       <Button
                         variant="contained"
                         size="small"
                         onClick={() => setCreateAlertDialogOpen(true)}
                       >
-                        Create Alert
+                        Create alert
                       </Button>
                     </Box>
-                    <AlertsPanel
-                      siteId={site.id}
-                      maxAlerts={10}
-                      showAcknowledge={true}
-                    />
+                    <AlertsPanel siteId={site.id} maxAlerts={10} showAcknowledge={true} />
                   </CardContent>
                 </Card>
               </Grid>
             </Grid>
+            </Box>
           </Fade>
         )}
       </Box>
 
-      {/* Last Update Indicator */}
       {autoRefresh && (
         <Box sx={{ mt: 2, textAlign: 'center' }}>
-          <Typography variant="caption" color="textSecondary">
-            Auto-refresh enabled • Last updated: {lastUpdate.toLocaleTimeString()}
+          <Typography variant="caption" color="text.secondary">
+            Auto-refresh on · Last updated {lastUpdate.toLocaleTimeString()}
           </Typography>
         </Box>
       )}
 
       <EditSiteForm
         open={editDialogOpen}
-        site={site ? {
-          id: site.id,
-          name: site.name,
-          type: site.type as 'solar' | 'wind' | 'hybrid',
-          latitude: site.latitude,
-          longitude: site.longitude,
-          capacity_mw: site.capacity_mw,
-          timezone: site.timezone,
-          pv_params: (site as any).pv_params,
-          turbine_params: (site as any).turbine_params,
-        } : null}
+        site={
+          site
+            ? {
+                id: site.id,
+                name: site.name,
+                type: site.type as 'solar' | 'wind' | 'hybrid',
+                latitude: site.latitude,
+                longitude: site.longitude,
+                capacity_mw: site.capacity_mw,
+                timezone: site.timezone,
+                pv_params: (site as any).pv_params,
+                turbine_params: (site as any).turbine_params,
+              }
+            : null
+        }
         onClose={() => setEditDialogOpen(false)}
-        onSuccess={() => {
-          // Query will auto-refresh due to invalidation in EditSiteForm
-        }}
+        onSuccess={() => undefined}
       />
 
       <CreateAlertForm
         open={createAlertDialogOpen}
         siteId={site?.id || ''}
         onClose={() => setCreateAlertDialogOpen(false)}
-        onSuccess={() => {
-          // Query will auto-refresh due to invalidation in CreateAlertForm
-        }}
+        onSuccess={() => undefined}
       />
-      
+
       <Dialog
         open={deleteDialogOpen}
-        onClose={handleDeleteCancel}
+        onClose={() => setDeleteDialogOpen(false)}
         aria-labelledby="delete-dialog-title"
-        aria-describedby="delete-dialog-description"
       >
-        <DialogTitle id="delete-dialog-title">
-          Delete Site
-        </DialogTitle>
+        <DialogTitle id="delete-dialog-title">Delete site</DialogTitle>
         <DialogContent>
-          <DialogContentText id="delete-dialog-description">
-            Are you sure you want to delete the site "{site?.name}"? 
-            This action cannot be undone and will also delete all associated forecasts, 
-            alerts, and historical data.
+          <DialogContentText>
+            Are you sure you want to delete the site &quot;{site?.name}&quot;? This cannot be
+            undone and will also delete associated forecasts, alerts, and historical data.
           </DialogContentText>
         </DialogContent>
         <DialogActions>
-          <Button onClick={handleDeleteCancel} color="primary">
-            Cancel
-          </Button>
+          <Button onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
           <Button onClick={handleDeleteConfirm} color="error" variant="contained" autoFocus>
             Delete
           </Button>
         </DialogActions>
       </Dialog>
-    </Container>
+    </Box>
   );
 };
 
 export default SiteDetail;
-

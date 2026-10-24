@@ -3,8 +3,8 @@ OpenWeather API integration for weather data
 """
 import aiohttp
 import asyncio
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Optional, TYPE_CHECKING
 import sys
 from pathlib import Path
 import pytz
@@ -17,6 +17,9 @@ sys.path.insert(0, str(backend_dir))
 from core.config import get_settings
 from core.logging import get_logger
 from core.models import WeatherData
+
+if TYPE_CHECKING:
+    from services.forecasting.weather.providers import WeatherForecastPoint
 
 # Import rate limiters (optional - will work without them)
 try:
@@ -32,6 +35,10 @@ except ImportError:
 logger = get_logger('openweather-service')
 settings = get_settings()
 
+SOLAR_RADIATION_FORECAST_URL = (
+    "https://api.openweathermap.org/data/2.5/solar_radiation/forecast"
+)
+
 
 class OpenWeatherClient:
     """Client for OpenWeather API with rate limiting and caching"""
@@ -41,6 +48,7 @@ class OpenWeatherClient:
         self.api_url = settings.OPENWEATHER_API_URL  # Forecast API (2.5)
         self.current_url = getattr(settings, 'OPENWEATHER_CURRENT_URL', 'https://api.openweathermap.org/data/2.5/weather')
         self.history_url = "https://history.openweathermap.org/data/2.5/history/city"
+        self.solar_forecast_url = SOLAR_RADIATION_FORECAST_URL
         self.cache_manager = cache_manager
         self.db_pool = db_pool  # Database connection pool for storing data
         if not self.api_key:
@@ -158,7 +166,155 @@ class OpenWeatherClient:
         except Exception as e:
             logger.error("Error fetching forecast from OpenWeather", exc_info=e)
             return None
-    
+
+    async def get_solar_forecast(
+        self,
+        latitude: float,
+        longitude: float,
+        hours: int = 48,
+        hub_height_m: float = 80.0,
+    ) -> Optional[List["WeatherForecastPoint"]]:
+        """
+        Fetch real GHI/DNI/DHI from the OpenWeather Solar Radiation forecast API.
+
+        A 401 or 404 means the key has no solar subscription: log and return None.
+        Never invent irradiance from cloud cover. Wind and temperature are merged
+        from the free 5-day/3-hour forecast when available.
+        """
+        from services.forecasting.weather.providers import WeatherForecastPoint
+
+        if not self.api_key:
+            logger.warning("OpenWeather API key not configured for solar forecast")
+            return None
+
+        cache_key = f"openweather:solar:{latitude}:{longitude}:{hours}"
+        if self.cache_manager:
+            cached = await self.cache_manager.get(cache_key)
+            if cached:
+                return [
+                    WeatherForecastPoint(
+                        timestamp=datetime.fromisoformat(p["timestamp"]),
+                        ghi=p.get("ghi"),
+                        dni=p.get("dni"),
+                        dhi=p.get("dhi"),
+                        wind_speed_hub_ms=p.get("wind_speed_hub_ms"),
+                        temperature=p.get("temperature"),
+                        pressure=p.get("pressure"),
+                        source="openweather-solar",
+                    )
+                    for p in cached
+                ]
+
+        rate_limit_key = "openweather:api"
+        if not await openweather_rate_limiter.acquire(rate_limit_key):
+            await openweather_rate_limiter.wait_if_needed(rate_limit_key)
+        if not await openweather_daily_limiter.acquire(rate_limit_key):
+            logger.error("OpenWeather daily rate limit exceeded")
+            return None
+
+        try:
+            params = {
+                "lat": latitude,
+                "lon": longitude,
+                "appid": self.api_key,
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    self.solar_forecast_url,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response:
+                    if response.status in (401, 403, 404):
+                        error_text = await response.text()
+                        logger.warning(
+                            "OpenWeather solar subscription unavailable; skipping failover",
+                            status=response.status,
+                            body=error_text[:300],
+                        )
+                        return None
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(
+                            "OpenWeather Solar Radiation API error",
+                            status=response.status,
+                            body=error_text[:500],
+                        )
+                        return None
+                    data = await response.json()
+        except Exception as e:
+            logger.error("Error fetching OpenWeather solar forecast", exc_info=e)
+            return None
+
+        radiation_list = data.get("list") or []
+        if not radiation_list:
+            return None
+
+        # Optional companion meteo for wind/temp (no invented GHI)
+        companion = await self.get_forecast(
+            latitude=latitude, longitude=longitude, hours=hours
+        )
+        companion_by_hour: Dict[int, Dict] = {}
+        if companion:
+            for item in companion:
+                dt = item.get("dt")
+                if dt is not None:
+                    companion_by_hour[int(dt) // 3600] = item
+
+        points: List[WeatherForecastPoint] = []
+        for item in radiation_list[:hours]:
+            dt = item.get("dt")
+            if dt is None:
+                continue
+            ts = datetime.utcfromtimestamp(int(dt)).replace(tzinfo=timezone.utc)
+            radiation = item.get("radiation") or {}
+            ghi = radiation.get("ghi")
+            dni = radiation.get("dni")
+            dhi = radiation.get("dhi")
+            if ghi is None and dni is None and dhi is None:
+                continue
+
+            wind_speed = None
+            temperature = None
+            pressure = None
+            companion_item = companion_by_hour.get(int(dt) // 3600)
+            if companion_item:
+                wind_speed = (companion_item.get("wind") or {}).get("speed")
+                main = companion_item.get("main") or {}
+                temperature = main.get("temp")
+                pressure = main.get("pressure")
+            # 10 m wind is a coarse stand-in when Open-Meteo is down; label via source.
+            _ = hub_height_m
+
+            points.append(
+                WeatherForecastPoint(
+                    timestamp=ts,
+                    ghi=float(ghi) if ghi is not None else None,
+                    dni=float(dni) if dni is not None else None,
+                    dhi=float(dhi) if dhi is not None else None,
+                    wind_speed_hub_ms=float(wind_speed) if wind_speed is not None else None,
+                    temperature=float(temperature) if temperature is not None else None,
+                    pressure=float(pressure) if pressure is not None else None,
+                    source="openweather-solar",
+                )
+            )
+
+        if self.cache_manager and points:
+            serialisable = [
+                {
+                    "timestamp": p.timestamp.isoformat(),
+                    "ghi": p.ghi,
+                    "dni": p.dni,
+                    "dhi": p.dhi,
+                    "wind_speed_hub_ms": p.wind_speed_hub_ms,
+                    "temperature": p.temperature,
+                    "pressure": p.pressure,
+                }
+                for p in points
+            ]
+            await self.cache_manager.set(cache_key, serialisable, ttl_seconds=3600)
+
+        return points or None
+
     async def get_historical_weather(
         self,
         latitude: float,
@@ -322,25 +478,27 @@ class OpenWeatherClient:
         weather = openweather_data.get('weather', [{}])[0]
         wind = openweather_data.get('wind', {})
         clouds = openweather_data.get('clouds', {})
-        
-        # Calculate GHI from cloud cover and solar position (simplified)
-        # This is a rough estimate - in production, use proper solar irradiance models
-        cloud_cover = clouds.get('all', 0)  # Percentage
-        # Estimate GHI based on cloud cover (simplified model)
-        # Clear sky GHI ~ 1000 W/m², reduced by cloud cover
-        estimated_ghi = max(0, 1000 * (1 - cloud_cover / 100))
-        
+        cloud_cover = clouds.get('all', 0)
+
+        # Do not invent GHI from cloud cover. Use Solar Radiation / Open-Meteo for power.
+        radiation = openweather_data.get('radiation') or {}
+        ghi = radiation.get('ghi')
+        dni = radiation.get('dni')
+        dhi = radiation.get('dhi')
+
         return WeatherData(
             timestamp=timestamp,
             station_id=station_id,
-            ghi=estimated_ghi,
+            ghi=float(ghi) if ghi is not None else None,
+            dni=float(dni) if dni is not None else None,
+            dhi=float(dhi) if dhi is not None else None,
             wind_speed=wind.get('speed'),
             wind_direction=wind.get('deg'),
             temperature=main.get('temp'),
             humidity=main.get('humidity'),
             pressure=main.get('pressure'),
             cloud_cover=cloud_cover,
-            precipitation=openweather_data.get('rain', {}).get('3h', 0) or 
+            precipitation=openweather_data.get('rain', {}).get('3h', 0) or
                          openweather_data.get('snow', {}).get('3h', 0),
             quality_score=1.0,
             raw_value=openweather_data
@@ -376,10 +534,9 @@ class OpenWeatherClient:
             wind_direction = wind.get('deg')
             cloud_cover = clouds.get('all', 0)
             precipitation = rain.get('3h', 0) or rain.get('1h', 0) or snow.get('3h', 0) or snow.get('1h', 0) or 0
-            
-            # Estimate GHI from cloud cover
-            estimated_ghi = max(0, 1000 * (1 - cloud_cover / 100)) if cloud_cover else None
-            
+            radiation = response_data.get('radiation') or {}
+            estimated_ghi = radiation.get('ghi')
+
             # Use data timestamp from response or current time
             if data_timestamp is None:
                 if 'dt' in response_data:

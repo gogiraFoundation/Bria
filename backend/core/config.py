@@ -29,6 +29,15 @@ class Settings(BaseSettings):
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRATION_HOURS: int = 24
+
+    # Auth / tenancy
+    # Public self-serve registration is off by default; when enabled each
+    # registrant gets a new tenant (never the shared "default" tenant).
+    ALLOW_PUBLIC_REGISTRATION: bool = False
+
+    # Ingestion
+    # Required for HTTP/WebSocket ingest. Missing key means ingest returns 503.
+    INGESTION_API_KEY: Optional[str] = None
     
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
@@ -66,6 +75,11 @@ class Settings(BaseSettings):
     # Monitoring
     PROMETHEUS_ENABLED: bool = True
     METRICS_PORT: int = 9091
+
+    # When true, operational solar forecasts use nameplate yield
+    # (capacity_mw * POA/1000 * temp * losses * inverter). Set false to
+    # restore the legacy path that also multiplied by module efficiency.
+    SOLAR_NAMEPLATE_YIELD: bool = True
     
     model_config = {
         "env_file": str(Path(__file__).parent.parent.parent / ".env"),

@@ -3,12 +3,13 @@ Bria Data Ingestion Service
 Handles MQTT, HTTP REST, WebSocket, and Modbus TCP data ingestion
 """
 import asyncio
+import hmac
 import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Dict, Any, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 import aiomqtt
@@ -88,44 +89,19 @@ class IngestionService:
             logger.info("Kafka not available - service will run without Kafka")
             self.kafka_producer = None
         
-        # Redis client (optional)
+        # Redis client (optional). Do not strip credentials on failure.
         try:
             self.redis_client = await redis.from_url(
                 settings.REDIS_URL,
                 decode_responses=True,
                 socket_connect_timeout=2
             )
-            # Test connection
             await self.redis_client.ping()
             logger.info("Redis connection established")
         except Exception as e:
-            # If connection fails and URL contains password, try without password
-            if 'password' in settings.REDIS_URL.lower() or '@' in settings.REDIS_URL:
-                try:
-                    # Extract host and port, remove password
-                    import re
-                    match = re.match(r'redis://(?:[^:]+:[^@]+@)?([^:]+):(\d+)(?:/(\d+))?', settings.REDIS_URL)
-                    if match:
-                        host, port, db = match.groups()
-                        redis_url = f'redis://{host}:{port}'
-                        if db:
-                            redis_url += f'/{db}'
-                        self.redis_client = await redis.from_url(
-                            redis_url,
-                            decode_responses=True,
-                            socket_connect_timeout=2
-                        )
-                        await self.redis_client.ping()
-                        logger.info("Redis connection established (without password)")
-                    else:
-                        raise
-                except Exception:
-                    logger.warning(f"Redis connection failed (service will run without caching): {e}")
-                    self.redis_client = None
-            else:
-                logger.warning(f"Redis connection failed (service will run without caching): {e}")
-                self.redis_client = None
-        
+            logger.warning(f"Redis connection failed (service will run without caching): {e}")
+            self.redis_client = None
+
         logger.info("Ingestion service initialized (some features may be in degraded mode)")
     
     async def shutdown(self):
@@ -157,13 +133,10 @@ class IngestionService:
         """Calculate data quality score"""
         score = 1.0
         
-        # Check for missing critical fields
-        if data.site_id == "solar":
-            if data.ghi is None:
-                score -= 0.3
-        elif data.site_id == "wind":
-            if data.wind_speed is None:
-                score -= 0.3
+        # This ingestion pipeline does not reliably know the site type.
+        # Use the presence of commonly required weather fields to estimate quality.
+        if data.ghi is None:
+            score -= 0.3
         
         # Check timestamp freshness
         age_seconds = (datetime.utcnow() - data.timestamp.replace(tzinfo=None)).total_seconds()
@@ -186,7 +159,8 @@ class IngestionService:
             
             if validated.quality_score > 0.8:
                 await self.data_buffer.put(validated)
-                await self.publish_to_kafka('weather-raw', validated.dict())
+                # Use canonical topic name for raw weather ingestion
+                await self.publish_to_kafka('raw.weather', validated.dict())
                 await self.cache_realtime(validated)
                 
                 DATA_INGESTION_COUNT.labels(source='mqtt', type='weather').inc()
@@ -314,9 +288,28 @@ app.add_middleware(
 )
 
 
+def _require_ingestion_api_key(provided: Optional[str]) -> None:
+    """Reject ingest when INGESTION_API_KEY is unset (503) or wrong (401)."""
+    expected = getattr(settings, "INGESTION_API_KEY", None)
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Ingestion API key is not configured",
+        )
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-API-Key",
+        )
+
+
 @app.post("/ingest/weather")
-async def ingest_weather(data: Dict[str, Any]):
-    """HTTP endpoint for weather data ingestion"""
+async def ingest_weather(
+    data: Dict[str, Any],
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+):
+    """HTTP endpoint for weather data ingestion (requires X-API-Key)."""
+    _require_ingestion_api_key(x_api_key)
     try:
         if 'timestamp' not in data:
             data['timestamp'] = datetime.utcnow().isoformat()
@@ -326,7 +319,8 @@ async def ingest_weather(data: Dict[str, Any]):
         validated = await ingestion_service.validate_data(data)
         
         if validated.quality_score > 0.8:
-            await ingestion_service.publish_to_kafka('weather-raw', validated.dict())
+            # Use canonical topic name for raw weather ingestion
+            await ingestion_service.publish_to_kafka('raw.weather', validated.dict())
             await ingestion_service.cache_realtime(validated)
             
             DATA_INGESTION_COUNT.labels(source='http', type='weather').inc()
@@ -341,6 +335,8 @@ async def ingest_weather(data: Dict[str, Any]):
                 status_code=400,
                 detail=f"Low quality data rejected: quality_score={validated.quality_score}"
             )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error ingesting weather data", exc_info=e)
         DATA_INGESTION_ERRORS.labels(source='http', error_type='processing_error').inc()
@@ -349,7 +345,16 @@ async def ingest_weather(data: Dict[str, Any]):
 
 @app.websocket("/ws/ingest")
 async def websocket_ingest(websocket: WebSocket):
-    """WebSocket endpoint for real-time data ingestion"""
+    """WebSocket endpoint for real-time data ingestion (requires X-API-Key)."""
+    api_key = websocket.query_params.get("api_key") or websocket.headers.get("x-api-key")
+    expected = getattr(settings, "INGESTION_API_KEY", None)
+    if not expected:
+        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+        return
+    if not api_key or not hmac.compare_digest(api_key, expected):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await websocket.accept()
     logger.info("WebSocket connection established")
     
@@ -365,7 +370,8 @@ async def websocket_ingest(websocket: WebSocket):
             validated = await ingestion_service.validate_data(data)
             
             if validated.quality_score > 0.8:
-                await ingestion_service.publish_to_kafka('weather-raw', validated.dict())
+                # Use canonical topic name for raw weather ingestion
+                await ingestion_service.publish_to_kafka('raw.weather', validated.dict())
                 await ingestion_service.cache_realtime(validated)
                 
                 DATA_INGESTION_COUNT.labels(source='websocket', type='weather').inc()

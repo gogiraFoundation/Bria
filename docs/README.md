@@ -1,25 +1,29 @@
-# Bria Documentation
+# Bria documentation
 
-This directory contains technical documentation for the Bria platform.
+Technical documentation for the Bria platform. Prefer these guides over the root TRD when describing **current** behaviour.
 
-## Core Documentation
+## Living codebase
 
-- **[SECURITY.md](./SECURITY.md)** - Security policy and best practices
-- **[PRODUCTION.md](./PRODUCTION.md)** - Production deployment guide and checklist
-- **[CONTRIBUTING.md](./CONTRIBUTING.md)** - Contribution guidelines for developers
-- **[CHANGELOG.md](./CHANGELOG.md)** - Version history and changes
+- **[CODEBASE.md](./CODEBASE.md)** — Repository map, runtime architecture, API surface, auth/tenancy, data model, frontend ops shell, config, tests, known gaps
+- **[WEATHER_AND_FORECASTS.md](./WEATHER_AND_FORECASTS.md)** — Open-Meteo → OpenWeather chain and unavailable forecast semantics
+- **[adr/](./adr/)** — Architecture decision records
 
-## Setup & Configuration
+## Operations and security
 
-- **[KAFKA_SETUP.md](./KAFKA_SETUP.md)** - Kafka configuration and setup
-- **[OPENWEATHER_SETUP.md](./OPENWEATHER_SETUP.md)** - OpenWeather API integration guide
-- **[TROUBLESHOOTING_LOGIN.md](./TROUBLESHOOTING_LOGIN.md)** - Authentication troubleshooting
+- **[SECURITY.md](./SECURITY.md)** — Security policy and practices
+- **[PRODUCTION.md](./PRODUCTION.md)** — Production deployment guide and checklist
+- **[CONTRIBUTING.md](./CONTRIBUTING.md)** — Contribution guidelines
+- **[CHANGELOG.md](./CHANGELOG.md)** — Version history
 
-## Quick Reference
+## Setup and troubleshooting
 
-For getting started, see the main [README.md](../README.md) in the root directory.
+- **[KAFKA_SETUP.md](./KAFKA_SETUP.md)** — Kafka configuration
+- **[OPENWEATHER_SETUP.md](./OPENWEATHER_SETUP.md)** — OpenWeather credentials (see also weather guide for priority)
+- **[TROUBLESHOOTING_LOGIN.md](./TROUBLESHOOTING_LOGIN.md)** — Authentication troubleshooting
 
-For deployment instructions, see [PRODUCTION.md](./PRODUCTION.md).
+## Quick reference
 
-For security concerns, see [SECURITY.md](./SECURITY.md).
-
+- Root [README.md](../README.md): original Technical Requirements Document (aspirational)
+- Env template: [`.env.example`](../.env.example)
+- Frontend notes: [`frontend/dashboard/README_FRONTEND.md`](../frontend/dashboard/README_FRONTEND.md)
+- Backend stub: [`backend/README.md`](../backend/README.md)

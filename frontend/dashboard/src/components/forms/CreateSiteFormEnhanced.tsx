@@ -262,6 +262,15 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
   const [loading, setLoading] = useState(false);
   const [geocoding, setGeocoding] = useState(false);
 
+  // Reset wizard state when the dialog is opened
+  useEffect(() => {
+    if (open) {
+      setActiveTab(0);
+      setError('');
+      setShowMap(false);
+    }
+  }, [open]);
+
   // Auto-detect timezone from coordinates
   useEffect(() => {
     if (formData.latitude && formData.longitude) {
@@ -525,20 +534,35 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
 
   const estimatedGen = calculateEstimatedGeneration();
 
+  const missingLocation =
+    !formData.latitude?.trim() ||
+    !formData.longitude?.trim() ||
+    isNaN(parseFloat(formData.latitude)) ||
+    isNaN(parseFloat(formData.longitude));
+
+  const canSubmitBasics =
+    Boolean(formData.name.trim()) &&
+    Boolean(formData.capacity_mw) &&
+    !isNaN(parseFloat(formData.capacity_mw)) &&
+    parseFloat(formData.capacity_mw) > 0;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     
     if (!formData.name.trim()) {
       setError('Site name is required');
+      setActiveTab(0);
       return;
     }
     if (!formData.capacity_mw || parseFloat(formData.capacity_mw) <= 0) {
       setError('Capacity must be greater than 0');
+      setActiveTab(0);
       return;
     }
-    if (!formData.latitude || !formData.longitude) {
-      setError('Latitude and longitude are required');
+    if (missingLocation) {
+      setError('Latitude and longitude are required. Set them on the Location tab (enter coordinates, geocode an address, or use your current location).');
+      setActiveTab(1);
       return;
     }
     
@@ -599,8 +623,33 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
         // Store in a metadata field (would need backend support)
       }
 
-      // Add type-specific parameters
-      if (formData.type === 'solar') {
+      // Location fields persisted on sites table
+      if (formData.country) {
+        const matched = COUNTRIES.find(
+          (c) => c.name === formData.country || c.code === formData.country
+        );
+        siteData.country_code = matched
+          ? matched.code
+          : formData.country.length === 2
+            ? formData.country.toUpperCase()
+            : undefined;
+      }
+      if (formData.elevation) {
+        siteData.elevation_m = parseFloat(formData.elevation);
+      }
+      if (formData.status) {
+        siteData.status = formData.status;
+      }
+      if (formData.city) {
+        siteData.city = formData.city;
+      }
+      const addressParts = [formData.address, formData.postcode].filter(Boolean);
+      if (addressParts.length > 0) {
+        siteData.address_line = addressParts.join(', ');
+      }
+
+      // Solar / wind parameters (hybrid stores both)
+      if (formData.type === 'solar' || formData.type === 'hybrid') {
         siteData.pv_params = {
           module_type: formData.module_type,
           tilt: parseFloat(formData.tilt),
@@ -612,7 +661,8 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
           noct: parseFloat(formData.noct),
           area: parseFloat(formData.area),
         };
-      } else if (formData.type === 'wind') {
+      }
+      if (formData.type === 'wind' || formData.type === 'hybrid') {
         siteData.turbine_params = {
           hub_height: parseFloat(formData.hub_height),
           rotor_diameter: parseFloat(formData.rotor_diameter),
@@ -625,52 +675,39 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
         };
       }
 
-      // Add terrain information if provided
+      // Terrain, equipment, financial, and metadata attach to whichever param blocks exist
       if (formData.terrain_type || formData.slope_angle) {
-        if (!siteData.pv_params) siteData.pv_params = {};
-        if (!siteData.turbine_params) siteData.turbine_params = {};
-        const terrainData: any = {
-          type: formData.terrain_type,
-        };
+        const terrainData: any = { type: formData.terrain_type };
         if (formData.slope_angle && parseFloat(formData.slope_angle) > 0) {
           terrainData.slope_angle = parseFloat(formData.slope_angle);
         }
-        if (formData.type === 'solar') {
-          siteData.pv_params.terrain = terrainData;
-        } else {
-          siteData.turbine_params.terrain = terrainData;
-        }
+        if (siteData.pv_params) siteData.pv_params.terrain = terrainData;
+        if (siteData.turbine_params) siteData.turbine_params.terrain = terrainData;
       }
 
-      // Add equipment information if provided (store in metadata)
-      const equipment: any = {};
-      if (formData.type === 'solar') {
-        if (formData.panel_manufacturer) equipment.panel_manufacturer = formData.panel_manufacturer;
-        if (formData.panel_model) equipment.panel_model = formData.panel_model;
-        if (formData.num_panels) equipment.num_panels = parseInt(formData.num_panels);
-        if (formData.inverter_manufacturer) equipment.inverter_manufacturer = formData.inverter_manufacturer;
-        if (formData.inverter_model) equipment.inverter_model = formData.inverter_model;
-        if (formData.string_config) equipment.string_config = formData.string_config;
-        if (formData.monitoring_system) equipment.monitoring_system = formData.monitoring_system;
-        if (formData.array_config) equipment.array_config = formData.array_config;
-      } else if (formData.type === 'wind') {
-        if (formData.turbine_manufacturer) equipment.turbine_manufacturer = formData.turbine_manufacturer;
-        if (formData.turbine_model) equipment.turbine_model = formData.turbine_model;
-        if (formData.gearbox_type) equipment.gearbox_type = formData.gearbox_type;
-        if (formData.generator_specs) equipment.generator_specs = formData.generator_specs;
-        if (formData.control_system) equipment.control_system = formData.control_system;
-      }
-      if (Object.keys(equipment).length > 0) {
-        if (!siteData.pv_params) siteData.pv_params = {};
-        if (!siteData.turbine_params) siteData.turbine_params = {};
-        if (formData.type === 'solar') {
-          siteData.pv_params.equipment = equipment;
-        } else {
-          siteData.turbine_params.equipment = equipment;
-        }
+      const solarEquipment: any = {};
+      if (formData.panel_manufacturer) solarEquipment.panel_manufacturer = formData.panel_manufacturer;
+      if (formData.panel_model) solarEquipment.panel_model = formData.panel_model;
+      if (formData.num_panels) solarEquipment.num_panels = parseInt(formData.num_panels);
+      if (formData.inverter_manufacturer) solarEquipment.inverter_manufacturer = formData.inverter_manufacturer;
+      if (formData.inverter_model) solarEquipment.inverter_model = formData.inverter_model;
+      if (formData.string_config) solarEquipment.string_config = formData.string_config;
+      if (formData.monitoring_system) solarEquipment.monitoring_system = formData.monitoring_system;
+      if (formData.array_config) solarEquipment.array_config = formData.array_config;
+      if (siteData.pv_params && Object.keys(solarEquipment).length > 0) {
+        siteData.pv_params.equipment = solarEquipment;
       }
 
-      // Add financial information if provided (store in metadata)
+      const windEquipment: any = {};
+      if (formData.turbine_manufacturer) windEquipment.turbine_manufacturer = formData.turbine_manufacturer;
+      if (formData.turbine_model) windEquipment.turbine_model = formData.turbine_model;
+      if (formData.gearbox_type) windEquipment.gearbox_type = formData.gearbox_type;
+      if (formData.generator_specs) windEquipment.generator_specs = formData.generator_specs;
+      if (formData.control_system) windEquipment.control_system = formData.control_system;
+      if (siteData.turbine_params && Object.keys(windEquipment).length > 0) {
+        siteData.turbine_params.equipment = windEquipment;
+      }
+
       const financial: any = {};
       if (formData.currency) financial.currency = formData.currency;
       if (formData.ppa_rate) financial.ppa_rate = parseFloat(formData.ppa_rate);
@@ -680,16 +717,10 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
       if (formData.capex) financial.capex = parseFloat(formData.capex);
       if (formData.revenue_sharing) financial.revenue_sharing = formData.revenue_sharing;
       if (Object.keys(financial).length > 0) {
-        if (!siteData.pv_params) siteData.pv_params = {};
-        if (!siteData.turbine_params) siteData.turbine_params = {};
-        if (formData.type === 'solar') {
-          siteData.pv_params.financial = financial;
-        } else {
-          siteData.turbine_params.financial = financial;
-        }
+        if (siteData.pv_params) siteData.pv_params.financial = financial;
+        if (siteData.turbine_params) siteData.turbine_params.financial = financial;
       }
 
-      // Add metadata
       const metadata: any = {};
       if (formData.description) metadata.description = formData.description;
       if (formData.tags.length > 0) metadata.tags = formData.tags;
@@ -701,14 +732,8 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
       if (formData.contact_email) metadata.contact_email = formData.contact_email;
       if (formData.contact_phone) metadata.contact_phone = formData.contact_phone;
       if (Object.keys(metadata).length > 0) {
-        // Store metadata in pv_params or turbine_params as JSONB
-        if (!siteData.pv_params) siteData.pv_params = {};
-        if (!siteData.turbine_params) siteData.turbine_params = {};
-        if (formData.type === 'solar') {
-          siteData.pv_params.metadata = metadata;
-        } else {
-          siteData.turbine_params.metadata = metadata;
-        }
+        if (siteData.pv_params) siteData.pv_params.metadata = metadata;
+        if (siteData.turbine_params) siteData.turbine_params.metadata = metadata;
       }
 
       await axios.post(`${API_URL}/v1/sites`, siteData, {
@@ -901,6 +926,22 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
                   placeholder="Optional: Describe the site, its purpose, or any special characteristics..."
                 />
               </Grid>
+              <Grid item xs={12}>
+                <Alert
+                  severity={missingLocation ? 'warning' : 'success'}
+                  action={
+                    missingLocation ? (
+                      <Button color="inherit" size="small" onClick={() => setActiveTab(1)}>
+                        Set location
+                      </Button>
+                    ) : undefined
+                  }
+                >
+                  {missingLocation
+                    ? 'Location is required before you can create a site. Open the Location tab to enter coordinates, geocode an address, or use your current location.'
+                    : `Location set: ${formData.latitude}, ${formData.longitude}`}
+                </Alert>
+              </Grid>
               {estimatedGen && (
                 <Grid item xs={12}>
                   <Card variant="outlined">
@@ -1077,17 +1118,17 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
                   fullWidth
                   label="Latitude"
                   type="text"
-                  key={`lat-${formData.latitude || 'empty'}`}
                   value={formData.latitude || ''}
                   onChange={(e) => {
                     const value = e.target.value;
                     // Allow numbers, decimal point, and minus sign
                     if (value === '' || /^-?\d*\.?\d*$/.test(value)) {
                       setFormData(prev => ({ ...prev, latitude: value }));
+                      setError('');
                     }
                   }}
                   required
-                  inputProps={{ 
+                  inputProps={{
                     inputMode: 'decimal',
                     pattern: '-?[0-9]*\\.?[0-9]*',
                   }}
@@ -1099,17 +1140,17 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
                   fullWidth
                   label="Longitude"
                   type="text"
-                  key={`lon-${formData.longitude || 'empty'}`}
                   value={formData.longitude || ''}
                   onChange={(e) => {
                     const value = e.target.value;
                     // Allow numbers, decimal point, and minus sign
                     if (value === '' || /^-?\d*\.?\d*$/.test(value)) {
                       setFormData(prev => ({ ...prev, longitude: value }));
+                      setError('');
                     }
                   }}
                   required
-                  inputProps={{ 
+                  inputProps={{
                     inputMode: 'decimal',
                     pattern: '-?[0-9]*\\.?[0-9]*',
                   }}
@@ -1891,16 +1932,7 @@ const CreateSiteFormEnhanced: React.FC<CreateSiteFormEnhancedProps> = ({ open, o
           <Button
             type="submit"
             variant="contained"
-            disabled={
-              loading ||
-              !formData.name.trim() ||
-              !formData.capacity_mw ||
-              !formData.latitude ||
-              !formData.longitude ||
-              isNaN(parseFloat(formData.latitude)) ||
-              isNaN(parseFloat(formData.longitude)) ||
-              isNaN(parseFloat(formData.capacity_mw))
-            }
+            disabled={loading || !canSubmitBasics}
           >
             {loading ? 'Creating...' : 'Create Site'}
           </Button>
